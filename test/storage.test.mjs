@@ -110,3 +110,49 @@ test('Storage readEventArtifact returns compact JSON text for structured artifac
   assert.deepEqual(JSON.parse(result.content), value);
   assert.equal(result.has_more, false);
 });
+
+test('Storage can resolve runs and events by run_id through the global registry', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-storage-registry-'));
+  const storage = new Storage();
+  const runRecord = {
+    runId: `run-${Date.now()}`,
+    backend: 'codex',
+    role: 'worker',
+    sessionId: 'session-1',
+    status: 'completed',
+    cwd,
+    prompt: 'hello',
+    metadata: {},
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    lastSeq: 1,
+    summary: 'done',
+    result: { finalResponse: 'done' },
+    error: null,
+  };
+  const event = {
+    seq: 1,
+    ts: new Date().toISOString(),
+    run_id: runRecord.runId,
+    session_id: 'session-1',
+    backend: 'codex',
+    type: 'run_completed',
+    data: { final_response: 'done' },
+  };
+
+  await storage.writeRunRecord(runRecord);
+  await storage.appendEvent(cwd, runRecord.runId, event);
+
+  assert.equal(await storage.resolveRunCwd(runRecord.runId), cwd);
+
+  const loadedRecord = await storage.readRunRecordById(runRecord.runId);
+  assert.equal(loadedRecord?.runId, runRecord.runId);
+
+  const loadedEvents = await storage.readEventsById(runRecord.runId, 0, 10);
+  assert.equal(loadedEvents.length, 1);
+  assert.equal(loadedEvents[0].seq, 1);
+
+  const listed = await storage.listRunRecords({ cwd });
+  assert.equal(listed.some((record) => record.runId === runRecord.runId), true);
+});

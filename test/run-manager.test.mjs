@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat } from 'node:fs/promises';
 
 import { RunManager } from '../dist/core/run-manager.js';
 
@@ -41,6 +41,39 @@ test('cancelRun persists lastSeq and cancelled event consistently', async () => 
   assert.equal(polled.events[0].data.status, 'cancelled');
 });
 
+test('late terminal events do not override cancelled status', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-cancel-late-'));
+  const manager = new RunManager([new LateTerminalAdapter()]);
+
+  const spawned = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'cancel me',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await manager.cancelRun({ run_id: spawned.run_id });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: spawned.run_id });
+    assert.equal(run.status, 'cancelled');
+    assert.equal(run.last_seq, 2);
+  });
+
+  const polled = await manager.pollEvents({
+    run_id: spawned.run_id,
+    after_seq: 0,
+    limit: 10,
+    wait_ms: 0,
+  });
+  assert.deepEqual(polled.events.map((event) => event.type), ['status_changed', 'run_completed']);
+
+  const runJson = await readRunJson(cwd, spawned.run_id);
+  assert.equal(runJson.status, 'cancelled');
+  assert.equal(runJson.completedAt !== null, true);
+});
+
 test('markRunFailed persists lastSeq when background run fails', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-fail-'));
   const manager = new RunManager([new RejectingAdapter()]);
@@ -64,15 +97,58 @@ test('markRunFailed persists lastSeq when background run fails', async () => {
   assert.match(runJson.error, /simulated failure/);
 });
 
-test('RunManager sanitizes oversized events and serves full content through getEventArtifact', async () => {
-  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-artifacts-'));
+test('spawnRun does not persist orphaned queued runs when adapter spawn fails', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-spawn-fail-'));
+  const manager = new RunManager([new FailingSpawnAdapter()]);
+
+  await assert.rejects(
+    manager.spawnRun({
+      backend: 'codex',
+      role: 'worker',
+      prompt: 'explode',
+      cwd,
+      session_mode: 'new',
+    }),
+    /spawn failure/,
+  );
+
+  const runsDir = path.join(cwd, '.nanobot-orchestrator', 'runs');
+  await assert.rejects(stat(runsDir), /ENOENT/);
+
+  const listed = await manager.listRuns({ cwd });
+  assert.equal(listed.runs.length, 0);
+});
+
+test('shutdown cancels active runs and persists terminal state', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-shutdown-'));
+  const manager = new RunManager([new HangingAdapter()]);
+
+  const spawned = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'hang',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await manager.shutdown(1000);
+
+  const run = await manager.getRun({ run_id: spawned.run_id });
+  assert.equal(run.status, 'cancelled');
+
+  const runJson = await readRunJson(cwd, spawned.run_id);
+  assert.equal(runJson.status, 'cancelled');
+});
+
+test('RunManager can read historical runs and artifacts back from disk', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-history-'));
   const stdout = 'S'.repeat(9000);
   const rawToolUseResult = {
     content: 'R'.repeat(7000),
     file_path: '/tmp/project/README.md',
     kind: 'read_result',
   };
-  const manager = new RunManager([
+  const liveManager = new RunManager([
     new CompletingAdapter([
       {
         type: 'run_started',
@@ -97,7 +173,7 @@ test('RunManager sanitizes oversized events and serves full content through getE
     ]),
   ]);
 
-  const spawned = await manager.spawnRun({
+  const spawned = await liveManager.spawnRun({
     backend: 'codex',
     role: 'worker',
     prompt: 'sanitize',
@@ -106,12 +182,17 @@ test('RunManager sanitizes oversized events and serves full content through getE
   });
 
   await waitFor(async () => {
-    const run = await manager.getRun({ run_id: spawned.run_id });
+    const run = await liveManager.getRun({ run_id: spawned.run_id });
     assert.equal(run.status, 'completed');
     assert.equal(run.last_seq, 3);
   });
 
-  const polled = await manager.pollEvents({
+  const historicalManager = new RunManager([]);
+  const historicalRun = await historicalManager.getRun({ run_id: spawned.run_id });
+  assert.equal(historicalRun.status, 'completed');
+  assert.equal(historicalRun.cwd, cwd);
+
+  const polled = await historicalManager.pollEvents({
     run_id: spawned.run_id,
     after_seq: 0,
     limit: 10,
@@ -132,7 +213,7 @@ test('RunManager sanitizes oversized events and serves full content through getE
     },
   });
 
-  const stdoutArtifact = await manager.getEventArtifact({
+  const stdoutArtifact = await historicalManager.getEventArtifact({
     run_id: spawned.run_id,
     seq: toolEvent.seq,
     field_path: '/stdout',
@@ -140,15 +221,18 @@ test('RunManager sanitizes oversized events and serves full content through getE
   assert.equal(stdoutArtifact.content, stdout);
   assert.equal(stdoutArtifact.has_more, false);
 
-  const readArtifact = await manager.getEventArtifact({
+  const readArtifact = await historicalManager.getEventArtifact({
     run_id: spawned.run_id,
     seq: toolEvent.seq,
     field_path: '/raw_tool_use_result',
   });
   assert.deepEqual(JSON.parse(readArtifact.content), rawToolUseResult);
 
+  const listed = await historicalManager.listRuns({ cwd });
+  assert.equal(listed.runs.some((run) => run.run_id === spawned.run_id), true);
+
   await assert.rejects(
-    manager.getEventArtifact({
+    historicalManager.getEventArtifact({
       run_id: spawned.run_id,
       seq: toolEvent.seq,
       field_path: '/missing',
@@ -182,11 +266,33 @@ class HangingAdapter {
   }
 }
 
+class LateTerminalAdapter {
+  backend = 'codex';
+
+  async spawn(params) {
+    return new LateTerminalHandle(params.session.sessionId);
+  }
+
+  async cancel(handle) {
+    handle.abort();
+  }
+}
+
 class RejectingAdapter {
   backend = 'codex';
 
   async spawn(params) {
     return new RejectingHandle(params.session.sessionId);
+  }
+
+  async cancel() {}
+}
+
+class FailingSpawnAdapter {
+  backend = 'codex';
+
+  async spawn() {
+    throw new Error('spawn failure');
   }
 
   async cancel() {}
@@ -230,6 +336,49 @@ class HangingHandle {
 
   abort() {
     this.resolveRun();
+  }
+}
+
+class LateTerminalHandle {
+  constructor(sessionId) {
+    this.sessionId = sessionId;
+    this.result = { finalResponse: 'done' };
+    this.aborted = false;
+    this.eventStream = (async function* (self) {
+      while (!self.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      yield {
+        seq: 0,
+        ts: new Date().toISOString(),
+        run_id: '',
+        session_id: sessionId,
+        backend: 'codex',
+        type: 'run_completed',
+        data: {
+          final_response: 'done',
+        },
+      };
+    })(this);
+  }
+
+  async run() {
+    while (!this.aborted) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  getSummary() {
+    return 'Late completion';
+  }
+
+  getResult() {
+    return this.result;
+  }
+
+  abort() {
+    this.aborted = true;
   }
 }
 

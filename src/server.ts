@@ -10,13 +10,17 @@ import { registerListRunsTool } from './tools/list-runs.js';
 import { registerPollEventsTool } from './tools/poll-events.js';
 import { registerSpawnRunTool } from './tools/spawn-run.js';
 
+export function createDefaultManager(): RunManager {
+  return new RunManager([new CodexAdapter(), new ClaudeCodeAdapter()]);
+}
+
 export function createServer(options?: { manager?: RunManager }): McpServer {
   const server = new McpServer({
     name: 'nanobot-orchestration-mcp',
     version: '0.1.0',
   });
 
-  const manager = options?.manager ?? new RunManager([new CodexAdapter(), new ClaudeCodeAdapter()]);
+  const manager = options?.manager ?? createDefaultManager();
 
   registerSpawnRunTool(server, manager);
   registerGetRunTool(server, manager);

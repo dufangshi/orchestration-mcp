@@ -244,6 +244,157 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
   assert.equal(events.at(-1).data.structured_output.status, 'ok');
 });
 
+
+test('ClaudeCodeAdapter ignores late result messages after abort', async () => {
+  const adapter = new ClaudeCodeAdapter(() =>
+    createDelayedFakeQuery([
+      {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'session-1',
+        uuid: 'u-result',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: false,
+        num_turns: 1,
+        result: 'late success',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          server_tool_use: { web_search_requests: 0 },
+        },
+        modelUsage: {},
+        permission_denials: [],
+        structured_output: { ok: true },
+      },
+    ], 5),
+  );
+
+  const handle = await adapter.spawn({
+    runId: 'run-1',
+    role: 'worker',
+    prompt: 'Implement feature',
+    cwd: '/tmp/project',
+    sessionMode: 'new',
+    session: {
+      sessionId: 'session-1',
+      backend: 'claude_code',
+      cwd: '/tmp/project',
+      backendSessionId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      metadata: {},
+    },
+    metadata: {},
+  });
+
+  const eventsPromise = collect(handle.eventStream);
+  const runPromise = handle.run();
+  handle.abort();
+  await runPromise;
+  const events = await eventsPromise;
+
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ['run_started', 'status_changed'],
+  );
+  assert.equal(handle.getSummary(), 'Run cancelled');
+  assert.equal(handle.getResult(), null);
+});
+
+test('ClaudeCodeAdapter emits exactly one command_started when tool_progress arrives before tool_use', async () => {
+  const adapter = new ClaudeCodeAdapter(() =>
+    createFakeQuery([
+      {
+        type: 'tool_progress',
+        session_id: 'session-1',
+        uuid: 'u-tool-progress',
+        tool_use_id: 'tool-1',
+        tool_name: 'Bash',
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 1,
+      },
+      {
+        type: 'assistant',
+        session_id: 'session-1',
+        uuid: 'u-tool-use',
+        parent_tool_use_id: null,
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tool-1',
+              name: 'Bash',
+              input: {
+                command: 'npm test',
+              },
+            },
+          ],
+        },
+      },
+      {
+        type: 'tool_use_summary',
+        session_id: 'session-1',
+        uuid: 'u-tool-summary',
+        summary: 'Ran npm test',
+        preceding_tool_use_ids: ['tool-1'],
+      },
+      {
+        type: 'result',
+        subtype: 'success',
+        session_id: 'session-1',
+        uuid: 'u-result',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: false,
+        num_turns: 1,
+        result: 'done',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          server_tool_use: { web_search_requests: 0 },
+        },
+        modelUsage: {},
+        permission_denials: [],
+        structured_output: { ok: true },
+      },
+    ]),
+  );
+
+  const handle = await adapter.spawn({
+    runId: 'run-1',
+    role: 'worker',
+    prompt: 'Implement feature',
+    cwd: '/tmp/project',
+    sessionMode: 'new',
+    session: {
+      sessionId: 'session-1',
+      backend: 'claude_code',
+      cwd: '/tmp/project',
+      backendSessionId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      metadata: {},
+    },
+    metadata: {},
+  });
+
+  const eventsPromise = collect(handle.eventStream);
+  await handle.run();
+  const events = await eventsPromise;
+
+  assert.equal(events.filter((event) => event.type === 'command_started').length, 1);
+  assert.equal(events.filter((event) => event.type === 'command_finished').length, 1);
+});
+
 async function collect(iterable) {
   const values = [];
   for await (const value of iterable) {
@@ -255,6 +406,18 @@ async function collect(iterable) {
 function createFakeQuery(messages) {
   const iterator = (async function* () {
     for (const message of messages) {
+      yield message;
+    }
+  })();
+
+  iterator.close = () => {};
+  return iterator;
+}
+
+function createDelayedFakeQuery(messages, delayMs) {
+  const iterator = (async function* () {
+    for (const message of messages) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
       yield message;
     }
   })();

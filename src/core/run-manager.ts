@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { normalizedEventSchema } from './schemas.js';
 import { attachArtifactRefs, sanitizeEvent } from './event-sanitizer.js';
 import { EventBuffer } from './event-buffer.js';
 import { SessionManager } from './session-manager.js';
@@ -86,7 +87,6 @@ export class RunManager {
       error: null,
     };
 
-    await this.storage.writeRunRecord(record);
     const handle = await adapter.spawn({
       runId,
       role: input.role,
@@ -98,19 +98,21 @@ export class RunManager {
       outputSchema: input.output_schema,
       metadata,
     });
-    const buffer = new EventBuffer();
+
     const managed: ManagedRun = {
       record,
       session,
       adapter,
       handle,
-      buffer,
+      buffer: new EventBuffer(),
       task: Promise.resolve(),
     };
+
+    this.runs.set(runId, managed);
+    await this.storage.writeRunRecord(record);
     managed.task = this.runManaged(managed).catch(async (error) => {
       await this.markRunFailed(managed, String(error));
     });
-    this.runs.set(runId, managed);
 
     return {
       run_id: runId,
@@ -122,32 +124,58 @@ export class RunManager {
   }
 
   async getRun(input: GetRunInput): Promise<GetRunResult> {
-    const managed = this.getManagedRun(input.run_id);
-    return toGetRunResult(managed.record);
+    const managed = this.findManagedRun(input.run_id);
+    if (managed) {
+      return toGetRunResult(managed.record);
+    }
+
+    const record = await this.storage.readRunRecordById(input.run_id);
+    if (!record) {
+      throw new Error(`Unknown run_id: ${input.run_id}`);
+    }
+    return toGetRunResult(record);
   }
 
   async pollEvents(input: PollEventsInput): Promise<PollEventsResult> {
-    const managed = this.getManagedRun(input.run_id);
-    const events = await managed.buffer.waitForAfter(
-      input.after_seq,
-      input.limit ?? 100,
-      input.wait_ms ?? 20000,
-    );
+    const managed = this.findManagedRun(input.run_id);
+    if (managed) {
+      const events = await managed.buffer.waitForAfter(
+        input.after_seq,
+        input.limit ?? 100,
+        input.wait_ms ?? 20000,
+      );
+      return {
+        run_id: managed.record.runId,
+        status: managed.record.status,
+        events,
+        next_after_seq: events.at(-1)?.seq ?? input.after_seq,
+      };
+    }
+
+    const record = await this.storage.readRunRecordById(input.run_id);
+    if (!record) {
+      throw new Error(`Unknown run_id: ${input.run_id}`);
+    }
+    const events = await this.storage.readEvents(record.cwd, record.runId, input.after_seq, input.limit ?? 100);
     return {
-      run_id: managed.record.runId,
-      status: managed.record.status,
+      run_id: record.runId,
+      status: record.status,
       events,
       next_after_seq: events.at(-1)?.seq ?? input.after_seq,
     };
   }
 
   async cancelRun(input: CancelRunInput): Promise<CancelRunResult> {
-    const managed = this.getManagedRun(input.run_id);
-    if (
-      managed.record.status === 'completed' ||
-      managed.record.status === 'failed' ||
-      managed.record.status === 'cancelled'
-    ) {
+    const managed = this.findManagedRun(input.run_id);
+    if (!managed) {
+      const existing = await this.storage.readRunRecordById(input.run_id);
+      if (!existing) {
+        throw new Error(`Unknown run_id: ${input.run_id}`);
+      }
+      throw new Error(`run is not active in this process: ${existing.status}`);
+    }
+
+    if (isTerminalStatus(managed.record.status)) {
       throw new Error(`run is already terminal: ${managed.record.status}`);
     }
 
@@ -175,10 +203,20 @@ export class RunManager {
   }
 
   async getEventArtifact(input: GetEventArtifactInput): Promise<GetEventArtifactResult> {
-    const managed = this.getManagedRun(input.run_id);
-    return this.storage.readEventArtifact(
-      managed.record.cwd,
-      managed.record.runId,
+    const managed = this.findManagedRun(input.run_id);
+    if (managed) {
+      return this.storage.readEventArtifact(
+        managed.record.cwd,
+        managed.record.runId,
+        input.seq,
+        input.field_path,
+        input.offset ?? 0,
+        input.limit ?? 65536,
+      );
+    }
+
+    return this.storage.readEventArtifactById(
+      input.run_id,
       input.seq,
       input.field_path,
       input.offset ?? 0,
@@ -187,8 +225,22 @@ export class RunManager {
   }
 
   async listRuns(input: ListRunsInput): Promise<ListRunsResult> {
-    const runs = [...this.runs.values()]
-      .map((managed) => managed.record)
+    const liveRecords = [...this.runs.values()].map((managed) => managed.record);
+    const persistedRecords = await this.storage.listRunRecords({
+      cwd: input.cwd,
+      backend: input.backend,
+      status: input.status,
+    });
+
+    const merged = new Map<string, RunRecord>();
+    for (const record of persistedRecords) {
+      merged.set(record.runId, record);
+    }
+    for (const record of liveRecords) {
+      merged.set(record.runId, record);
+    }
+
+    const runs = [...merged.values()]
       .filter((record) => {
         if (input.status && record.status !== input.status) {
           return false;
@@ -201,9 +253,40 @@ export class RunManager {
         }
         return true;
       })
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
       .map(toGetRunResult);
 
     return { runs };
+  }
+
+  async shutdown(timeoutMs = 5000): Promise<void> {
+    const activeRuns = [...this.runs.values()].filter((managed) => !isTerminalStatus(managed.record.status));
+    for (const managed of activeRuns) {
+      try {
+        await managed.adapter.cancel(managed.handle);
+        const cancelledAt = new Date().toISOString();
+        const event = this.prepareEvent(managed, {
+          seq: 0,
+          ts: cancelledAt,
+          run_id: '',
+          session_id: managed.record.sessionId,
+          backend: managed.record.backend,
+          type: 'status_changed',
+          data: {
+            status: 'cancelled',
+            reason: 'shutdown',
+          },
+        });
+        await this.persistEvent(managed, event);
+      } catch {
+        // Best-effort shutdown. Individual adapter failures should not block process exit.
+      }
+    }
+
+    await Promise.race([
+      Promise.allSettled([...this.runs.values()].map((managed) => managed.task)),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
   }
 
   private async loadResumeSession(
@@ -226,12 +309,8 @@ export class RunManager {
     return session;
   }
 
-  private getManagedRun(runId: string): ManagedRun {
-    const managed = this.runs.get(runId);
-    if (!managed) {
-      throw new Error(`Unknown run_id: ${runId}`);
-    }
-    return managed;
+  private findManagedRun(runId: string): ManagedRun | null {
+    return this.runs.get(runId) ?? null;
   }
 
   private async runManaged(managed: ManagedRun): Promise<void> {
@@ -294,13 +373,28 @@ export class RunManager {
 
   private applyEventToRecord(managed: ManagedRun, event: NormalizedEvent): void {
     const now = event.ts;
+    const previousStatus = managed.record.status;
     managed.record.lastSeq = event.seq;
     managed.record.updatedAt = now;
+
+    const backendSessionId = event.data.backend_session_id ?? event.data.thread_id;
+    if (
+      typeof backendSessionId === 'string' &&
+      backendSessionId &&
+      managed.session.backendSessionId !== backendSessionId
+    ) {
+      managed.session.backendSessionId = backendSessionId;
+      void this.sessions.update(managed.session);
+    }
+
+    if (isTerminalStatus(previousStatus)) {
+      return;
+    }
 
     const status = extractRunStatus(event);
     if (status) {
       managed.record.status = status;
-      if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+      if (isTerminalStatus(status)) {
         managed.record.completedAt = now;
       }
     }
@@ -328,16 +422,6 @@ export class RunManager {
       managed.record.summary = summary;
     }
 
-    const backendSessionId = event.data.backend_session_id ?? event.data.thread_id;
-    if (
-      typeof backendSessionId === 'string' &&
-      backendSessionId &&
-      managed.session.backendSessionId !== backendSessionId
-    ) {
-      managed.session.backendSessionId = backendSessionId;
-      void this.sessions.update(managed.session);
-    }
-
     if (managed.record.status === 'completed' || managed.record.status === 'failed') {
       managed.record.result = managed.handle.getResult() ?? managed.record.result;
     }
@@ -351,23 +435,19 @@ export class RunManager {
       sanitizedBase,
       artifacts,
     );
-    const sanitizedEvent = attachArtifactRefs(sanitizedBase, refs);
+    const validatedEvent = normalizedEventSchema.parse(attachArtifactRefs(sanitizedBase, refs));
 
-    this.applyEventToRecord(managed, sanitizedEvent);
-    managed.buffer.append(sanitizedEvent);
-    await this.storage.appendEvent(managed.record.cwd, managed.record.runId, sanitizedEvent);
+    this.applyEventToRecord(managed, validatedEvent);
+    managed.buffer.append(validatedEvent);
+    await this.storage.appendEvent(managed.record.cwd, managed.record.runId, validatedEvent);
     await this.storage.writeRunRecord(managed.record);
-    if (
-      managed.record.status === 'completed' ||
-      managed.record.status === 'failed' ||
-      managed.record.status === 'cancelled'
-    ) {
+    if (isTerminalStatus(managed.record.status)) {
       await this.storage.writeResult(managed.record.cwd, managed.record.runId, managed.record.result);
     }
   }
 
   private async markRunFailed(managed: ManagedRun, message: string): Promise<void> {
-    if (managed.record.status === 'failed' || managed.record.status === 'cancelled') {
+    if (isTerminalStatus(managed.record.status)) {
       return;
     }
     const failedAt = new Date().toISOString();
@@ -406,6 +486,10 @@ function toGetRunResult(record: RunRecord): GetRunResult {
 
 function isRawEvent(value: NormalizedEvent | { kind: 'raw' }): value is { kind: 'raw' } {
   return 'kind' in value && value.kind === 'raw';
+}
+
+function isTerminalStatus(status: RunStatus): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
 
 function extractRunStatus(event: NormalizedEvent): RunStatus | null {

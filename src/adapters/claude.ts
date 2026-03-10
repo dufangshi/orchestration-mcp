@@ -25,6 +25,7 @@ interface ClaudeToolState {
   taskId?: string;
   input?: Record<string, unknown>;
   parentToolUseId?: string | null;
+  startedEmitted?: boolean;
 }
 
 interface ToolResultPayload {
@@ -109,6 +110,7 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
 
   abort(): void {
     this.cancelled = true;
+    this.finished = true;
     this.summary = 'Run cancelled';
     this.sdkQuery.close();
   }
@@ -187,6 +189,10 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
   }
 
   private handleMessage(message: SDKMessage): void {
+    if (this.cancelled || this.finished) {
+      return;
+    }
+
     switch (message.type) {
       case 'assistant':
         this.handleAssistantMessage(message);
@@ -224,6 +230,14 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
       case 'system':
         this.handleSystemMessage(message);
         return;
+      default: {
+        const messageType = getStringProperty(message, 'type') ?? 'unknown';
+        this.summary = `Unhandled Claude SDK message: ${messageType}`;
+        this.emitReasoning(`Unhandled Claude SDK message: ${messageType}`, {
+          raw_message: message,
+        });
+        return;
+      }
     }
   }
 
@@ -391,19 +405,30 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
           getStringProperty(block, 'server_name') ??
           'tool';
         const input = getObjectProperty(block, 'input');
+        let toolState: ClaudeToolState | undefined;
         if (toolUseId) {
-          this.activeTools.set(toolUseId, {
+          const existing = this.activeTools.get(toolUseId);
+          toolState = {
             toolName,
+            taskId: existing?.taskId,
+            input: input ?? existing?.input,
+            parentToolUseId: message.parent_tool_use_id,
+            startedEmitted: existing?.startedEmitted ?? false,
+          };
+          this.activeTools.set(toolUseId, toolState);
+        }
+        if (!toolState?.startedEmitted) {
+          if (toolState && toolUseId) {
+            toolState.startedEmitted = true;
+            this.activeTools.set(toolUseId, toolState);
+          }
+          this.emitToolStart({
+            toolName,
+            toolUseId,
             input,
             parentToolUseId: message.parent_tool_use_id,
           });
         }
-        this.emitToolStart({
-          toolName,
-          toolUseId,
-          input,
-          parentToolUseId: message.parent_tool_use_id,
-        });
       }
     }
 
@@ -427,6 +452,7 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
         toolName: message.tool_name,
         taskId: message.task_id,
         parentToolUseId: message.parent_tool_use_id,
+        startedEmitted: true,
       };
       this.activeTools.set(message.tool_use_id, known);
       this.emitToolStart({
@@ -441,6 +467,7 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
     }
 
     known.taskId ??= message.task_id;
+    known.parentToolUseId ??= message.parent_tool_use_id;
 
     if (isCommandTool(known.toolName)) {
       const command = extractCommand(known.input);
@@ -562,6 +589,10 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
   }
 
   private handleResultMessage(message: Extract<SDKMessage, { type: 'result' }>): void {
+    if (this.cancelled || this.finished) {
+      return;
+    }
+
     const usage = {
       usage: message.usage,
       model_usage: message.modelUsage,

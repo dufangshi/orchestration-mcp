@@ -1,4 +1,5 @@
 import { mkdir, appendFile, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 
 import type {
@@ -37,6 +38,15 @@ interface ArtifactManifest {
   fields: Record<string, ArtifactManifestField>;
 }
 
+interface RunRegistryEntry {
+  cwd: string;
+  updated_at: string;
+}
+
+interface RunRegistry {
+  runs: Record<string, RunRegistryEntry>;
+}
+
 export class Storage {
   getRootDir(cwd: string): string {
     return path.join(cwd, ROOT_DIR);
@@ -62,6 +72,10 @@ export class Storage {
     return path.join(this.getSessionsDir(cwd), `${sessionId}.json`);
   }
 
+  getRegistryPath(): string {
+    return path.join(homedir(), ROOT_DIR, 'registry.json');
+  }
+
   async validateCwd(cwd: string): Promise<void> {
     const info = await stat(cwd);
     if (!info.isDirectory()) {
@@ -70,15 +84,91 @@ export class Storage {
   }
 
   async writeRunRecord(record: RunRecord): Promise<void> {
+    await this.registerRun(record.cwd, record.runId);
     const runDir = this.getRunDir(record.cwd, record.runId);
     await mkdir(runDir, { recursive: true });
     await writeJson(path.join(runDir, 'run.json'), record);
   }
 
+  async readRunRecord(cwd: string, runId: string): Promise<RunRecord | null> {
+    try {
+      const raw = await readFile(path.join(this.getRunDir(cwd, runId), 'run.json'), 'utf8');
+      return JSON.parse(raw) as RunRecord;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async readRunRecordById(runId: string): Promise<RunRecord | null> {
+    const cwd = await this.resolveRunCwd(runId);
+    if (!cwd) {
+      return null;
+    }
+    return this.readRunRecord(cwd, runId);
+  }
+
+  async listRunRecords(filters: {
+    cwd?: string;
+    backend?: RunRecord['backend'];
+    status?: RunRecord['status'];
+  } = {}): Promise<RunRecord[]> {
+    const registry = await this.readRegistry();
+    const records: RunRecord[] = [];
+
+    for (const [runId, entry] of Object.entries(registry.runs)) {
+      if (filters.cwd && entry.cwd !== filters.cwd) {
+        continue;
+      }
+      const record = await this.readRunRecord(entry.cwd, runId);
+      if (!record) {
+        continue;
+      }
+      if (filters.backend && record.backend !== filters.backend) {
+        continue;
+      }
+      if (filters.status && record.status !== filters.status) {
+        continue;
+      }
+      records.push(record);
+    }
+
+    records.sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+    return records;
+  }
+
   async appendEvent(cwd: string, runId: string, event: NormalizedEvent): Promise<void> {
+    await this.registerRun(cwd, runId);
     const runDir = this.getRunDir(cwd, runId);
     await mkdir(runDir, { recursive: true });
     await appendFile(path.join(runDir, 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8');
+  }
+
+  async readEvents(
+    cwd: string,
+    runId: string,
+    afterSeq: number,
+    limit: number,
+  ): Promise<NormalizedEvent[]> {
+    try {
+      const raw = await readFile(path.join(this.getRunDir(cwd, runId), 'events.jsonl'), 'utf8');
+      return raw.split(/\r?\n/).filter((line) => line.trim().length > 0).map((line) => JSON.parse(line) as NormalizedEvent).filter((event) => event.seq > afterSeq).slice(0, limit);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async readEventsById(runId: string, afterSeq: number, limit: number): Promise<NormalizedEvent[]> {
+    const cwd = await this.resolveRunCwd(runId);
+    if (!cwd) {
+      return [];
+    }
+    return this.readEvents(cwd, runId, afterSeq, limit);
   }
 
   async writeArtifacts(
@@ -91,11 +181,12 @@ export class Storage {
       return {};
     }
 
-    const eventDirName = `${String(event.seq).padStart(6, '0')}-${sanitizeArtifactName(event.type)}`;
-    const eventDir = path.join(this.getArtifactsDir(cwd, runId), eventDirName);
+    await this.registerRun(cwd, runId);
+    const eventDirSegment = eventDirName(event.seq, event.type);
+    const eventDir = path.join(this.getArtifactsDir(cwd, runId), eventDirSegment);
     await mkdir(eventDir, { recursive: true });
 
-    const relManifestPath = path.join('artifacts', eventDirName, 'manifest.json');
+    const relManifestPath = path.join('artifacts', eventDirSegment, 'manifest.json');
     const manifest: ArtifactManifest = {
       seq: event.seq,
       event_type: event.type,
@@ -177,7 +268,22 @@ export class Storage {
     };
   }
 
+  async readEventArtifactById(
+    runId: string,
+    seq: number,
+    fieldPath: string,
+    offset: number,
+    limit: number,
+  ): Promise<GetEventArtifactResult> {
+    const cwd = await this.resolveRunCwd(runId);
+    if (!cwd) {
+      throw new Error(`Unknown run_id: ${runId}`);
+    }
+    return this.readEventArtifact(cwd, runId, seq, fieldPath, offset, limit);
+  }
+
   async writeResult(cwd: string, runId: string, result: RunResult | null): Promise<void> {
+    await this.registerRun(cwd, runId);
     const runDir = this.getRunDir(cwd, runId);
     await mkdir(runDir, { recursive: true });
     await writeJson(path.join(runDir, 'result.json'), result);
@@ -201,6 +307,47 @@ export class Storage {
     }
   }
 
+  async resolveRunCwd(runId: string): Promise<string | null> {
+    const registry = await this.readRegistry();
+    return registry.runs[runId]?.cwd ?? null;
+  }
+
+  private async registerRun(cwd: string, runId: string): Promise<void> {
+    const registry = await this.readRegistry();
+    const nextEntry: RunRegistryEntry = {
+      cwd,
+      updated_at: new Date().toISOString(),
+    };
+    const currentEntry = registry.runs[runId];
+    if (currentEntry && currentEntry.cwd === nextEntry.cwd) {
+      registry.runs[runId] = nextEntry;
+    } else {
+      registry.runs[runId] = nextEntry;
+    }
+    await this.writeRegistry(registry);
+  }
+
+  private async readRegistry(): Promise<RunRegistry> {
+    try {
+      const raw = await readFile(this.getRegistryPath(), 'utf8');
+      const parsed = JSON.parse(raw) as Partial<RunRegistry>;
+      return {
+        runs: parsed.runs ?? {},
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { runs: {} };
+      }
+      throw error;
+    }
+  }
+
+  private async writeRegistry(registry: RunRegistry): Promise<void> {
+    const registryPath = this.getRegistryPath();
+    await mkdir(path.dirname(registryPath), { recursive: true });
+    await writeJson(registryPath, registry);
+  }
+
   private async readArtifactManifest(cwd: string, runId: string, seq: number): Promise<ArtifactManifest> {
     const artifactsDir = this.getArtifactsDir(cwd, runId);
     const prefix = `${String(seq).padStart(6, '0')}-`;
@@ -214,12 +361,15 @@ export class Storage {
       throw error;
     }
 
-    const eventDir = entries.find((entry) => entry.startsWith(prefix));
-    if (!eventDir) {
+    const matches = entries.filter((entry) => entry.startsWith(prefix)).sort();
+    if (matches.length === 0) {
       throw new Error(`No artifacts found for seq ${seq}`);
     }
+    if (matches.length > 1) {
+      throw new Error(`Multiple artifact directories found for seq ${seq}: ${matches.join(', ')}`);
+    }
 
-    const raw = await readFile(path.join(artifactsDir, eventDir, 'manifest.json'), 'utf8');
+    const raw = await readFile(path.join(artifactsDir, matches[0], 'manifest.json'), 'utf8');
     return JSON.parse(raw) as ArtifactManifest;
   }
 }
@@ -266,5 +416,6 @@ function sanitizeArtifactName(value: string): string {
 }
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}
+`, 'utf8');
 }
