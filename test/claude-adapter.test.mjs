@@ -105,6 +105,30 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
         elapsed_time_seconds: 1,
       },
       {
+        type: 'user',
+        session_id: 'session-1',
+        uuid: 'u-tool-result',
+        parent_tool_use_id: 'tool-1',
+        tool_use_result: {
+          tool_use_id: 'tool-1',
+          stdout: '8 tests passed',
+          stderr: '',
+          exitCode: 0,
+          persistedOutputPath: '/tmp/project/.logs/npm-test.txt',
+        },
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool-1',
+              is_error: false,
+              content: [{ type: 'text', text: '8 tests passed' }],
+            },
+          ],
+        },
+      },
+      {
         type: 'tool_use_summary',
         session_id: 'session-1',
         uuid: 'u-tool-summary',
@@ -210,7 +234,9 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
   assert.equal(events[3].data.command, 'npm test');
   assert.equal(events[4].data.tool, 'Read');
   assert.equal(events[5].data.command, 'npm test');
-  assert.equal(events[6].data.summary, 'Ran npm test');
+  assert.equal(events[6].data.stdout, '8 tests passed');
+  assert.equal(events[6].data.exit_code, 0);
+  assert.equal(events[6].data.persisted_output_path, '/tmp/project/.logs/npm-test.txt');
   assert.equal(events[7].data.tool, 'Read');
   assert.equal(events[8].data.changes.length, 2);
   assert.equal(events[9].data.text, 'Need to adjust the tests.');

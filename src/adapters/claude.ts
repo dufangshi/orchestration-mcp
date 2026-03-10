@@ -27,6 +27,22 @@ interface ClaudeToolState {
   parentToolUseId?: string | null;
 }
 
+interface ToolResultPayload {
+  toolUseIds: string[];
+  isError?: boolean;
+  text?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  interrupted?: boolean;
+  rawOutputPath?: string;
+  persistedOutputPath?: string;
+  persistedOutputSize?: number;
+  backgroundTaskId?: string;
+  content?: unknown;
+  rawToolUseResult?: unknown;
+}
+
 export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
   return {
     cwd: params.cwd,
@@ -59,6 +75,7 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
   private readonly sdkQuery: ClaudeQuery;
   private readonly params: AdapterSpawnParams;
   private readonly activeTools = new Map<string, ClaudeToolState>();
+  private readonly completedToolUseIds = new Set<string>();
   private readonly tasks = new Map<string, string>();
   private latestAgentMessage = '';
   private summary = 'Run queued';
@@ -178,7 +195,9 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
         this.handleResultMessage(message);
         return;
       case 'stream_event':
+        return;
       case 'user':
+        this.handleUserMessage(message);
         return;
       case 'tool_progress':
         this.handleToolProgress(message);
@@ -458,6 +477,10 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
     }
 
     for (const toolUseId of message.preceding_tool_use_ids) {
+      if (this.completedToolUseIds.has(toolUseId)) {
+        this.activeTools.delete(toolUseId);
+        continue;
+      }
       const toolState = this.activeTools.get(toolUseId);
       const tool = toolState?.toolName ?? 'tool';
       if (isCommandTool(tool)) {
@@ -481,6 +504,59 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
           task_id: toolState?.taskId,
         });
       }
+      this.completedToolUseIds.add(toolUseId);
+      this.activeTools.delete(toolUseId);
+    }
+  }
+
+  private handleUserMessage(message: Extract<SDKMessage, { type: 'user' }>): void {
+    const payload = extractToolResultPayload(message);
+    if (payload.toolUseIds.length === 0) {
+      return;
+    }
+
+    for (const toolUseId of payload.toolUseIds) {
+      if (this.completedToolUseIds.has(toolUseId)) {
+        continue;
+      }
+
+      const toolState = this.activeTools.get(toolUseId);
+      const toolName = toolState?.toolName ?? 'tool';
+      if (isCommandTool(toolName)) {
+        const command = extractCommand(toolState?.input);
+        this.summary = command ? `Command finished: ${command}` : `Command finished: ${toolName}`;
+        this.emitCommandEvent('command_finished', {
+          command,
+          tool: toolName,
+          tool_use_id: toolUseId,
+          task_id: toolState?.taskId,
+          output: payload.text,
+          stdout: payload.stdout,
+          stderr: payload.stderr,
+          exit_code: payload.exitCode,
+          interrupted: payload.interrupted,
+          raw_output_path: payload.rawOutputPath,
+          persisted_output_path: payload.persistedOutputPath,
+          persisted_output_size: payload.persistedOutputSize,
+          background_task_id: payload.backgroundTaskId,
+          is_error: payload.isError,
+          content: payload.content,
+          raw_tool_use_result: payload.rawToolUseResult,
+        });
+      } else {
+        this.summary = `Tool finished: ${toolName}`;
+        this.emitToolEvent('tool_finished', {
+          tool: toolName,
+          tool_use_id: toolUseId,
+          task_id: toolState?.taskId,
+          output: payload.text,
+          is_error: payload.isError,
+          content: payload.content,
+          raw_tool_use_result: payload.rawToolUseResult,
+        });
+      }
+
+      this.completedToolUseIds.add(toolUseId);
       this.activeTools.delete(toolUseId);
     }
   }
@@ -689,6 +765,30 @@ function getObjectProperty(value: unknown, key: string): Record<string, unknown>
     : undefined;
 }
 
+function getArrayProperty(value: unknown, key: string): unknown[] | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const property = (value as Record<string, unknown>)[key];
+  return Array.isArray(property) ? property : undefined;
+}
+
+function getNumberProperty(value: unknown, key: string): number | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const property = (value as Record<string, unknown>)[key];
+  return typeof property === 'number' ? property : undefined;
+}
+
+function getBooleanProperty(value: unknown, key: string): boolean | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const property = (value as Record<string, unknown>)[key];
+  return typeof property === 'boolean' ? property : undefined;
+}
+
 function extractCommand(input: Record<string, unknown> | undefined): string | undefined {
   if (!input) {
     return undefined;
@@ -703,6 +803,100 @@ function extractDescription(input: Record<string, unknown> | undefined): string 
   }
   const description = input.description;
   return typeof description === 'string' ? description : undefined;
+}
+
+function extractToolResultPayload(message: Extract<SDKMessage, { type: 'user' }>): ToolResultPayload {
+  const toolUseIds = new Set<string>();
+  if (message.parent_tool_use_id) {
+    toolUseIds.add(message.parent_tool_use_id);
+  }
+
+  const payload: ToolResultPayload = {
+    toolUseIds: [],
+    rawToolUseResult: message.tool_use_result,
+  };
+
+  if (message.tool_use_result && typeof message.tool_use_result === 'object') {
+    const raw = message.tool_use_result as Record<string, unknown>;
+    const toolUseId = getStringProperty(raw, 'tool_use_id');
+    if (toolUseId) {
+      toolUseIds.add(toolUseId);
+    }
+    payload.stdout = getStringProperty(raw, 'stdout');
+    payload.stderr = getStringProperty(raw, 'stderr');
+    payload.exitCode = getNumberProperty(raw, 'exitCode') ?? getNumberProperty(raw, 'exit_code');
+    payload.interrupted = getBooleanProperty(raw, 'interrupted');
+    payload.rawOutputPath =
+      getStringProperty(raw, 'rawOutputPath') ?? getStringProperty(raw, 'raw_output_path');
+    payload.persistedOutputPath =
+      getStringProperty(raw, 'persistedOutputPath') ?? getStringProperty(raw, 'persisted_output_path');
+    payload.persistedOutputSize =
+      getNumberProperty(raw, 'persistedOutputSize') ?? getNumberProperty(raw, 'persisted_output_size');
+    payload.backgroundTaskId =
+      getStringProperty(raw, 'backgroundTaskId') ?? getStringProperty(raw, 'background_task_id');
+    payload.content = raw.content;
+    payload.text = summarizeToolResultText(raw.content) ?? payload.stdout ?? payload.stderr;
+  } else if (message.tool_use_result !== undefined) {
+    payload.content = message.tool_use_result;
+    payload.text = summarizeToolResultText(message.tool_use_result);
+  }
+
+  const blocks = getMessageContentBlocks(message.message);
+  for (const block of blocks) {
+    const blockType = getStringProperty(block, 'type');
+    if (blockType !== 'tool_result') {
+      continue;
+    }
+
+    const toolUseId = getStringProperty(block, 'tool_use_id');
+    if (toolUseId) {
+      toolUseIds.add(toolUseId);
+    }
+
+    payload.isError ??= getBooleanProperty(block, 'is_error');
+    payload.content ??= (block as Record<string, unknown>).content;
+    payload.text ??= summarizeToolResultText((block as Record<string, unknown>).content);
+  }
+
+  payload.toolUseIds = [...toolUseIds];
+  return payload;
+}
+
+function getMessageContentBlocks(message: unknown): unknown[] {
+  if (!message || typeof message !== 'object') {
+    return [];
+  }
+  return getArrayProperty(message, 'content') ?? [];
+}
+
+function summarizeToolResultText(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const chunks: string[] = [];
+  for (const item of value) {
+    const text = getStringProperty(item, 'text');
+    if (text) {
+      chunks.push(text);
+      continue;
+    }
+    const nested = getArrayProperty(item, 'content');
+    if (nested) {
+      const nestedText = summarizeToolResultText(nested);
+      if (nestedText) {
+        chunks.push(nestedText);
+      }
+    }
+  }
+
+  if (chunks.length === 0) {
+    return undefined;
+  }
+  return chunks.join('\n');
 }
 
 function isCommandTool(toolName: string): boolean {
