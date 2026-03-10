@@ -352,7 +352,6 @@ export class CodexAdapter extends BaseRunAdapter {
     const threadOptions = {
       workingDirectory: params.cwd,
       skipGitRepoCheck: true,
-      model: params.model,
       sandboxMode: 'workspace-write' as const,
       approvalPolicy: 'never' as const,
       networkAccessEnabled: true,

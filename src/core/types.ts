@@ -35,7 +35,6 @@ export interface RunRecord {
   status: RunStatus;
   cwd: string;
   prompt: string;
-  model?: string;
   profile?: string;
   metadata: Record<string, unknown>;
   startedAt: string;
@@ -74,7 +73,6 @@ export interface SpawnRunInput {
   cwd: string;
   session_mode: SessionMode;
   session_id?: string;
-  model?: string;
   profile?: string;
   output_schema?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
@@ -147,7 +145,6 @@ export interface AdapterSpawnParams {
   cwd: string;
   sessionMode: SessionMode;
   session: SessionRecord;
-  model?: string;
   profile?: string;
   outputSchema?: Record<string, unknown>;
   metadata: Record<string, unknown>;

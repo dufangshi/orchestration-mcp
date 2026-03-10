@@ -9,16 +9,28 @@ const unknownObjectSchema = z.record(z.string(), z.unknown());
 
 export const spawnRunSchema = z
   .object({
-    backend: backendKindSchema,
-    role: runRoleSchema,
-    prompt: z.string().min(1),
-    cwd: z.string().min(1),
-    session_mode: sessionModeSchema,
+    backend: backendKindSchema.describe('Backend to execute the run. v1 only supports "codex".'),
+    role: runRoleSchema.describe('Supervisor role for this run: planner, worker, or reviewer.'),
+    prompt: z.string().min(1).describe('Primary instruction for the coding agent run.'),
+    cwd: z
+      .string()
+      .min(1)
+      .describe('Absolute working directory where the agent should run and where artifacts are stored.'),
+    session_mode: sessionModeSchema.describe('Use "new" to create a fresh session or "resume" to continue an existing one.'),
     session_id: z.string().min(1).optional(),
-    model: z.string().min(1).optional(),
-    profile: z.string().min(1).optional(),
-    output_schema: unknownObjectSchema.optional(),
-    metadata: unknownObjectSchema.optional(),
+    profile: z
+      .string()
+      .min(1)
+      .describe(
+        'Optional path to a profile/persona/job-description file. Leave blank unless explicitly instructed to use a profile.',
+      )
+      .optional(),
+    output_schema: unknownObjectSchema
+      .describe('Optional JSON Schema for structured final output from the run.')
+      .optional(),
+    metadata: unknownObjectSchema
+      .describe('Optional orchestration metadata for task/step correlation. It is stored but not interpreted by the MCP server.')
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (value.session_mode === 'resume' && !value.session_id) {
