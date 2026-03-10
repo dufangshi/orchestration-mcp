@@ -1,6 +1,6 @@
 import * as z from 'zod/v4';
 
-export const backendKindSchema = z.enum(['codex']);
+export const backendKindSchema = z.enum(['codex', 'claude_code']);
 export const runRoleSchema = z.enum(['planner', 'worker', 'reviewer']);
 export const runStatusSchema = z.enum(['queued', 'running', 'completed', 'failed', 'cancelled']);
 export const sessionModeSchema = z.enum(['new', 'resume']);
@@ -9,7 +9,9 @@ const unknownObjectSchema = z.record(z.string(), z.unknown());
 
 export const spawnRunSchema = z
   .object({
-    backend: backendKindSchema.describe('Backend to execute the run. v1 only supports "codex".'),
+    backend: backendKindSchema.describe(
+      'Backend to execute the run. Supported values are "codex" and "claude_code".',
+    ),
     role: runRoleSchema.describe('Supervisor role for this run: planner, worker, or reviewer.'),
     prompt: z.string().min(1).describe('Primary instruction for the coding agent run.'),
     cwd: z

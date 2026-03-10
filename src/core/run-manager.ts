@@ -140,17 +140,16 @@ export class RunManager {
 
   async cancelRun(input: CancelRunInput): Promise<CancelRunResult> {
     const managed = this.getManagedRun(input.run_id);
-    if (managed.record.status === 'completed' || managed.record.status === 'failed') {
+    if (
+      managed.record.status === 'completed' ||
+      managed.record.status === 'failed' ||
+      managed.record.status === 'cancelled'
+    ) {
       throw new Error(`run is already terminal: ${managed.record.status}`);
     }
 
     await managed.adapter.cancel(managed.handle);
     const cancelledAt = new Date().toISOString();
-    managed.record.status = 'cancelled';
-    managed.record.summary = 'Run cancelled';
-    managed.record.updatedAt = cancelledAt;
-    managed.record.completedAt = cancelledAt;
-
     const event = this.prepareEvent(managed, {
       seq: 0,
       ts: cancelledAt,
@@ -162,10 +161,8 @@ export class RunManager {
         status: 'cancelled',
       },
     });
-    managed.buffer.append(event);
-    await this.storage.appendEvent(managed.record.cwd, managed.record.runId, event);
-    await this.storage.writeRunRecord(managed.record);
-    await this.storage.writeResult(managed.record.cwd, managed.record.runId, managed.handle.getResult());
+    managed.record.result = managed.handle.getResult();
+    await this.persistEvent(managed, event);
 
     return {
       run_id: managed.record.runId,
@@ -268,17 +265,7 @@ export class RunManager {
         continue;
       }
       const event = this.prepareEvent(managed, adapterEvent);
-      this.applyEventToRecord(managed, event);
-      managed.buffer.append(event);
-      await this.storage.appendEvent(managed.record.cwd, managed.record.runId, event);
-      await this.storage.writeRunRecord(managed.record);
-      if (managed.record.status === 'completed' || managed.record.status === 'failed') {
-        await this.storage.writeResult(
-          managed.record.cwd,
-          managed.record.runId,
-          managed.record.result,
-        );
-      }
+      await this.persistEvent(managed, event);
     }
   }
 
@@ -329,9 +316,13 @@ export class RunManager {
       managed.record.summary = summary;
     }
 
-    const threadId = event.data.thread_id;
-    if (typeof threadId === 'string' && threadId && managed.session.backendSessionId !== threadId) {
-      managed.session.backendSessionId = threadId;
+    const backendSessionId = event.data.backend_session_id ?? event.data.thread_id;
+    if (
+      typeof backendSessionId === 'string' &&
+      backendSessionId &&
+      managed.session.backendSessionId !== backendSessionId
+    ) {
+      managed.session.backendSessionId = backendSessionId;
       void this.sessions.update(managed.session);
     }
 
@@ -340,16 +331,25 @@ export class RunManager {
     }
   }
 
+  private async persistEvent(managed: ManagedRun, event: NormalizedEvent): Promise<void> {
+    this.applyEventToRecord(managed, event);
+    managed.buffer.append(event);
+    await this.storage.appendEvent(managed.record.cwd, managed.record.runId, event);
+    await this.storage.writeRunRecord(managed.record);
+    if (
+      managed.record.status === 'completed' ||
+      managed.record.status === 'failed' ||
+      managed.record.status === 'cancelled'
+    ) {
+      await this.storage.writeResult(managed.record.cwd, managed.record.runId, managed.record.result);
+    }
+  }
+
   private async markRunFailed(managed: ManagedRun, message: string): Promise<void> {
     if (managed.record.status === 'failed' || managed.record.status === 'cancelled') {
       return;
     }
     const failedAt = new Date().toISOString();
-    managed.record.status = 'failed';
-    managed.record.summary = `Run failed: ${message}`;
-    managed.record.updatedAt = failedAt;
-    managed.record.completedAt = failedAt;
-    managed.record.error = message;
     managed.record.result = managed.handle.getResult();
 
     const event = this.prepareEvent(managed, {
@@ -363,10 +363,7 @@ export class RunManager {
         message,
       },
     });
-    managed.buffer.append(event);
-    await this.storage.appendEvent(managed.record.cwd, managed.record.runId, event);
-    await this.storage.writeRunRecord(managed.record);
-    await this.storage.writeResult(managed.record.cwd, managed.record.runId, managed.record.result);
+    await this.persistEvent(managed, event);
   }
 }
 
@@ -419,8 +416,12 @@ function deriveSummary(event: NormalizedEvent, fallback: string): string {
   switch (event.type) {
     case 'run_started':
       return 'Run started';
-    case 'status_changed':
+    case 'status_changed': {
+      if (event.data.status === 'cancelled') {
+        return 'Run cancelled';
+      }
       return typeof event.data.status === 'string' ? `Status: ${event.data.status}` : fallback;
+    }
     case 'command_started':
     case 'command_updated':
     case 'command_finished':

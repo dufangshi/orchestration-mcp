@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
+import { ClaudeCodeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { RunManager } from './core/run-manager.js';
 import { registerCancelRunTool } from './tools/cancel-run.js';
@@ -14,7 +15,7 @@ export function createServer(): McpServer {
     version: '0.1.0',
   });
 
-  const manager = new RunManager([new CodexAdapter()]);
+  const manager = new RunManager([new CodexAdapter(), new ClaudeCodeAdapter()]);
 
   registerSpawnRunTool(server, manager);
   registerGetRunTool(server, manager);

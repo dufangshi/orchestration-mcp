@@ -2,7 +2,7 @@ export type RunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancell
 
 export type RunRole = 'planner' | 'worker' | 'reviewer';
 
-export type BackendKind = 'codex';
+export type BackendKind = 'codex' | 'claude_code';
 
 export type SessionMode = 'new' | 'resume';
 
