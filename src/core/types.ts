@@ -66,6 +66,26 @@ export interface NormalizedEvent {
   data: Record<string, unknown>;
 }
 
+export interface ArtifactRef {
+  field_path: string;
+  relpath: string;
+  mime: string;
+  encoding: string;
+  total_bytes: number;
+  total_chars?: number;
+  chunk_count: number;
+  truncated: boolean;
+}
+
+export interface ArtifactWriteInstruction {
+  field_path: string;
+  mime: string;
+  encoding: string;
+  content: string;
+  total_chars?: number;
+  truncated: boolean;
+}
+
 export interface SpawnRunInput {
   backend: BackendKind;
   role: RunRole;
@@ -126,6 +146,28 @@ export interface CancelRunResult {
   run_id: string;
   status: RunStatus;
   cancelled_at: string;
+}
+
+export interface GetEventArtifactInput {
+  run_id: string;
+  seq: number;
+  field_path: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface GetEventArtifactResult {
+  run_id: string;
+  seq: number;
+  field_path: string;
+  mime: string;
+  encoding: string;
+  relpath: string;
+  total_bytes: number;
+  offset: number;
+  returned_bytes: number;
+  has_more: boolean;
+  content: string;
 }
 
 export interface ListRunsInput {

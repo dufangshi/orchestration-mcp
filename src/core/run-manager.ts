@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { attachArtifactRefs, sanitizeEvent } from './event-sanitizer.js';
 import { EventBuffer } from './event-buffer.js';
 import { SessionManager } from './session-manager.js';
 import { Storage } from './storage.js';
@@ -9,6 +10,8 @@ import type {
   BackendKind,
   CancelRunInput,
   CancelRunResult,
+  GetEventArtifactInput,
+  GetEventArtifactResult,
   GetRunInput,
   GetRunResult,
   ListRunsInput,
@@ -171,6 +174,18 @@ export class RunManager {
     };
   }
 
+  async getEventArtifact(input: GetEventArtifactInput): Promise<GetEventArtifactResult> {
+    const managed = this.getManagedRun(input.run_id);
+    return this.storage.readEventArtifact(
+      managed.record.cwd,
+      managed.record.runId,
+      input.seq,
+      input.field_path,
+      input.offset ?? 0,
+      input.limit ?? 65536,
+    );
+  }
+
   async listRuns(input: ListRunsInput): Promise<ListRunsResult> {
     const runs = [...this.runs.values()]
       .map((managed) => managed.record)
@@ -244,10 +259,7 @@ export class RunManager {
       return;
     }
 
-    if (
-      managed.record.status === 'running' ||
-      managed.record.status === 'queued'
-    ) {
+    if (managed.record.status === 'running' || managed.record.status === 'queued') {
       const completedAt = new Date().toISOString();
       managed.record.status = 'completed';
       managed.record.summary = managed.handle.getSummary() || 'Run completed';
@@ -332,9 +344,18 @@ export class RunManager {
   }
 
   private async persistEvent(managed: ManagedRun, event: NormalizedEvent): Promise<void> {
-    this.applyEventToRecord(managed, event);
-    managed.buffer.append(event);
-    await this.storage.appendEvent(managed.record.cwd, managed.record.runId, event);
+    const { event: sanitizedBase, artifacts } = sanitizeEvent(event);
+    const refs = await this.storage.writeArtifacts(
+      managed.record.cwd,
+      managed.record.runId,
+      sanitizedBase,
+      artifacts,
+    );
+    const sanitizedEvent = attachArtifactRefs(sanitizedBase, refs);
+
+    this.applyEventToRecord(managed, sanitizedEvent);
+    managed.buffer.append(sanitizedEvent);
+    await this.storage.appendEvent(managed.record.cwd, managed.record.runId, sanitizedEvent);
     await this.storage.writeRunRecord(managed.record);
     if (
       managed.record.status === 'completed' ||

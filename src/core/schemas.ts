@@ -59,10 +59,29 @@ export const cancelRunSchema = z.object({
   run_id: z.string().min(1),
 });
 
+export const getEventArtifactSchema = z.object({
+  run_id: z.string().min(1),
+  seq: z.number().int().min(1),
+  field_path: z.string().min(1),
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(262144).default(65536),
+});
+
 export const listRunsSchema = z.object({
   status: runStatusSchema.optional(),
   backend: backendKindSchema.optional(),
   cwd: z.string().min(1).optional(),
+});
+
+export const artifactRefSchema = z.object({
+  field_path: z.string(),
+  relpath: z.string(),
+  mime: z.string(),
+  encoding: z.string(),
+  total_bytes: z.number().int().min(0),
+  total_chars: z.number().int().min(0).optional(),
+  chunk_count: z.number().int().min(1),
+  truncated: z.boolean(),
 });
 
 export const normalizedEventSchema = z.object({
@@ -126,6 +145,20 @@ export const cancelRunResultSchema = z.object({
 
 export const listRunsResultSchema = z.object({
   runs: z.array(runSummarySchema),
+});
+
+export const getEventArtifactResultSchema = z.object({
+  run_id: z.string(),
+  seq: z.number().int().min(1),
+  field_path: z.string(),
+  mime: z.string(),
+  encoding: z.string(),
+  relpath: z.string(),
+  total_bytes: z.number().int().min(0),
+  offset: z.number().int().min(0),
+  returned_bytes: z.number().int().min(0),
+  has_more: z.boolean(),
+  content: z.string(),
 });
 
 export function asToolResult<T extends object>(payload: T): {
