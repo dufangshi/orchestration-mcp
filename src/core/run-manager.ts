@@ -1,16 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { normalizeInputMessage, summarizeMessageParts } from './messages.js';
 import { normalizedEventSchema } from './schemas.js';
 import { attachArtifactRefs, sanitizeEvent } from './event-sanitizer.js';
 import { EventBuffer } from './event-buffer.js';
 import { SessionManager } from './session-manager.js';
 import { Storage } from './storage.js';
 import type {
+  AgentMessage,
   AdapterRunHandle,
   BackendKind,
   CancelRunInput,
   CancelRunResult,
+  ContinueRunInput,
+  ContinueRunResult,
   GetEventArtifactInput,
   GetEventArtifactResult,
   GetRunInput,
@@ -61,6 +65,11 @@ export class RunManager {
     }
 
     const metadata = input.metadata ?? {};
+    const inputMessage = normalizeInputMessage({
+      prompt: input.prompt,
+      inputMessage: input.input_message,
+    });
+    const prompt = input.prompt ?? summarizeMessageParts(inputMessage.parts) ?? '[structured input]';
     const session =
       input.session_mode === 'resume'
         ? await this.loadResumeSession(input.cwd, input.backend, input.session_id ?? '')
@@ -75,9 +84,10 @@ export class RunManager {
       sessionId: session.sessionId,
       status: 'queued',
       cwd: input.cwd,
-      prompt: input.prompt,
+      prompt,
       profile: input.profile,
       metadata,
+      remoteRef: session.remoteRef,
       startedAt: now,
       updatedAt: now,
       completedAt: null,
@@ -90,13 +100,15 @@ export class RunManager {
     const handle = await adapter.spawn({
       runId,
       role: input.role,
-      prompt: input.prompt,
+      prompt,
+      inputMessage,
       cwd: input.cwd,
       sessionMode: input.session_mode,
       session,
       profile: input.profile,
       outputSchema: input.output_schema,
       metadata,
+      backendConfig: input.backend_config ?? {},
     });
 
     const managed: ManagedRun = {
@@ -134,6 +146,49 @@ export class RunManager {
       throw new Error(`Unknown run_id: ${input.run_id}`);
     }
     return toGetRunResult(record);
+  }
+
+  async continueRun(input: ContinueRunInput): Promise<ContinueRunResult> {
+    const managed = this.findManagedRun(input.run_id);
+    if (!managed) {
+      throw new Error(`run is not active in this process: ${input.run_id}`);
+    }
+    if (isTerminalStatus(managed.record.status)) {
+      throw new Error(`run is already terminal: ${managed.record.status}`);
+    }
+    if (managed.record.status !== 'input_required' && managed.record.status !== 'auth_required') {
+      throw new Error(`run is not awaiting additional input: ${managed.record.status}`);
+    }
+    const continueFn = managed.adapter.continue ?? managed.handle.continue;
+    if (!continueFn) {
+      throw new Error(`backend does not support continue: ${managed.record.backend}`);
+    }
+
+    const resumedAt = new Date().toISOString();
+    const resumeEvent = this.prepareEvent(managed, {
+      seq: 0,
+      ts: resumedAt,
+      run_id: '',
+      session_id: managed.record.sessionId,
+      backend: managed.record.backend,
+      type: 'status_changed',
+      data: {
+        status: 'running',
+        reason: 'continue_run',
+      },
+    });
+    await this.persistEvent(managed, resumeEvent);
+
+    if (managed.adapter.continue) {
+      await managed.adapter.continue(managed.handle, input.input_message);
+    } else {
+      await managed.handle.continue?.(input.input_message);
+    }
+
+    return {
+      run_id: managed.record.runId,
+      status: managed.record.status,
+    };
   }
 
   async pollEvents(input: PollEventsInput): Promise<PollEventsResult> {
@@ -303,7 +358,7 @@ export class RunManager {
         `Session ${sessionId} is bound to backend ${session.backend}, not ${backend}`,
       );
     }
-    if (!session.backendSessionId) {
+    if (!session.backendSessionId && !session.remoteRef?.context_id && !session.remoteRef?.conversation_id) {
       throw new Error(`Session ${sessionId} has no backend session id yet`);
     }
     return session;
@@ -338,7 +393,12 @@ export class RunManager {
       return;
     }
 
-    if (managed.record.status === 'running' || managed.record.status === 'queued') {
+    if (
+      managed.record.status === 'running' ||
+      managed.record.status === 'queued' ||
+      managed.record.status === 'input_required' ||
+      managed.record.status === 'auth_required'
+    ) {
       const completedAt = new Date().toISOString();
       managed.record.status = 'completed';
       managed.record.summary = managed.handle.getSummary() || 'Run completed';
@@ -377,13 +437,23 @@ export class RunManager {
     managed.record.lastSeq = event.seq;
     managed.record.updatedAt = now;
 
-    const backendSessionId = event.data.backend_session_id ?? event.data.thread_id;
+    const backendSessionId = event.data.backend_session_id ?? event.data.thread_id ?? event.data.context_id;
     if (
       typeof backendSessionId === 'string' &&
       backendSessionId &&
       managed.session.backendSessionId !== backendSessionId
     ) {
       managed.session.backendSessionId = backendSessionId;
+      void this.sessions.update(managed.session);
+    }
+
+    const remoteRef = extractRemoteRef(managed, event);
+    if (remoteRef) {
+      managed.session.remoteRef = {
+        ...(managed.session.remoteRef ?? {}),
+        ...remoteRef,
+      };
+      managed.record.remoteRef = managed.session.remoteRef;
       void this.sessions.update(managed.session);
     }
 
@@ -481,6 +551,7 @@ function toGetRunResult(record: RunRecord): GetRunResult {
     last_seq: record.lastSeq,
     cwd: record.cwd,
     metadata: record.metadata,
+    remote_ref: record.remoteRef,
   };
 }
 
@@ -489,7 +560,7 @@ function isRawEvent(value: NormalizedEvent | { kind: 'raw' }): value is { kind: 
 }
 
 function isTerminalStatus(status: RunStatus): boolean {
-  return status === 'completed' || status === 'failed' || status === 'cancelled';
+  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'rejected';
 }
 
 function extractRunStatus(event: NormalizedEvent): RunStatus | null {
@@ -502,14 +573,26 @@ function extractRunStatus(event: NormalizedEvent): RunStatus | null {
   if (event.type === 'run_failed') {
     return 'failed';
   }
+  if (event.type === 'input_required') {
+    return 'input_required';
+  }
+  if (event.type === 'auth_required') {
+    return 'auth_required';
+  }
+  if (event.type === 'rejected') {
+    return 'rejected';
+  }
   if (event.type === 'status_changed') {
     const status = event.data.status;
     if (
       status === 'queued' ||
       status === 'running' ||
+      status === 'input_required' ||
+      status === 'auth_required' ||
       status === 'completed' ||
       status === 'failed' ||
-      status === 'cancelled'
+      status === 'cancelled' ||
+      status === 'rejected'
     ) {
       return status;
     }
@@ -525,6 +608,12 @@ function deriveSummary(event: NormalizedEvent, fallback: string): string {
       if (event.data.status === 'cancelled') {
         return 'Run cancelled';
       }
+      if (event.data.status === 'input_required') {
+        return 'Waiting for additional input';
+      }
+      if (event.data.status === 'auth_required') {
+        return 'Authentication required';
+      }
       return typeof event.data.status === 'string' ? `Status: ${event.data.status}` : fallback;
     }
     case 'command_started':
@@ -538,8 +627,16 @@ function deriveSummary(event: NormalizedEvent, fallback: string): string {
     case 'tool_started':
     case 'tool_finished':
       return typeof event.data.tool === 'string' ? `${event.type}: ${event.data.tool}` : fallback;
+    case 'artifact_added':
+      return typeof event.data.name === 'string' ? `Artifact: ${event.data.name}` : 'Added artifact';
     case 'todo_updated':
       return 'Updated task checklist';
+    case 'input_required':
+      return typeof event.data.text === 'string' ? truncate(event.data.text) : 'Waiting for additional input';
+    case 'auth_required':
+      return typeof event.data.text === 'string' ? truncate(event.data.text) : 'Authentication required';
+    case 'rejected':
+      return typeof event.data.message === 'string' ? `Rejected: ${event.data.message}` : 'Run rejected';
     case 'run_completed':
       return 'Run completed';
     case 'run_failed':
@@ -548,11 +645,50 @@ function deriveSummary(event: NormalizedEvent, fallback: string): string {
         : 'Run failed';
     case 'agent_message':
       return typeof event.data.text === 'string' ? truncate(event.data.text) : fallback;
+    case 'message_added':
+      return typeof event.data.text === 'string' ? truncate(event.data.text) : 'Added message';
     case 'reasoning':
       return 'Updated reasoning';
     default:
       return fallback;
   }
+}
+
+function extractRemoteRef(managed: ManagedRun, event: NormalizedEvent): SessionRecord['remoteRef'] | null {
+  const value = event.data.remote_ref;
+  if (value && typeof value === 'object') {
+    return {
+      ...(value as SessionRecord['remoteRef']),
+      provider: managed.record.backend,
+    };
+  }
+
+  const contextId = getStringField(event.data, 'context_id');
+  const taskId = getStringField(event.data, 'task_id');
+  const agentUrl = getStringField(event.data, 'agent_url');
+  const agentName = getStringField(event.data, 'agent_name');
+  const conversationId =
+    getStringField(event.data, 'conversation_id') ??
+    getStringField(event.data, 'backend_session_id') ??
+    getStringField(event.data, 'thread_id');
+
+  if (!contextId && !taskId && !agentUrl && !agentName && !conversationId) {
+    return null;
+  }
+
+  return {
+    provider: managed.record.backend,
+    ...(conversationId ? { conversation_id: conversationId } : {}),
+    ...(taskId ? { task_id: taskId } : {}),
+    ...(contextId ? { context_id: contextId } : {}),
+    ...(agentUrl ? { agent_url: agentUrl } : {}),
+    ...(agentName ? { agent_name: agentName } : {}),
+  };
+}
+
+function getStringField(data: Record<string, unknown>, key: string): string | null {
+  const value = data[key];
+  return typeof value === 'string' && value ? value : null;
 }
 
 function truncate(value: string): string {

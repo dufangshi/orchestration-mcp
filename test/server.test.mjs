@@ -27,7 +27,7 @@ test('server registers all orchestration tools', async () => {
     const tools = await client.listTools();
     assert.deepEqual(
       tools.tools.map((tool) => tool.name).sort(),
-      ['cancel_run', 'get_event_artifact', 'get_run', 'list_runs', 'poll_events', 'spawn_run'],
+      ['cancel_run', 'continue_run', 'get_event_artifact', 'get_run', 'list_runs', 'poll_events', 'spawn_run'],
     );
   });
 });

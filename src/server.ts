@@ -2,8 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { ClaudeCodeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
+import { RemoteA2AAdapter } from './backends/remote-a2a.js';
 import { RunManager } from './core/run-manager.js';
 import { registerCancelRunTool } from './tools/cancel-run.js';
+import { registerContinueRunTool } from './tools/continue-run.js';
 import { registerGetEventArtifactTool } from './tools/get-event-artifact.js';
 import { registerGetRunTool } from './tools/get-run.js';
 import { registerListRunsTool } from './tools/list-runs.js';
@@ -11,7 +13,7 @@ import { registerPollEventsTool } from './tools/poll-events.js';
 import { registerSpawnRunTool } from './tools/spawn-run.js';
 
 export function createDefaultManager(): RunManager {
-  return new RunManager([new CodexAdapter(), new ClaudeCodeAdapter()]);
+  return new RunManager([new CodexAdapter(), new ClaudeCodeAdapter(), new RemoteA2AAdapter()]);
 }
 
 export function createServer(options?: { manager?: RunManager }): McpServer {
@@ -26,6 +28,7 @@ export function createServer(options?: { manager?: RunManager }): McpServer {
   registerGetRunTool(server, manager);
   registerPollEventsTool(server, manager);
   registerCancelRunTool(server, manager);
+  registerContinueRunTool(server, manager);
   registerListRunsTool(server, manager);
   registerGetEventArtifactTool(server, manager);
 

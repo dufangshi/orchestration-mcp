@@ -19,6 +19,7 @@ export class SessionManager {
       backend,
       cwd,
       backendSessionId: null,
+      remoteRef: null,
       createdAt: now,
       updatedAt: now,
       metadata,

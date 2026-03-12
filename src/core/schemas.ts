@@ -1,19 +1,79 @@
 import * as z from 'zod/v4';
 
-export const backendKindSchema = z.enum(['codex', 'claude_code']);
+export const backendKindSchema = z.enum(['codex', 'claude_code', 'remote_a2a']);
 export const runRoleSchema = z.enum(['planner', 'worker', 'reviewer']);
-export const runStatusSchema = z.enum(['queued', 'running', 'completed', 'failed', 'cancelled']);
+export const runStatusSchema = z.enum([
+  'queued',
+  'running',
+  'input_required',
+  'auth_required',
+  'completed',
+  'failed',
+  'cancelled',
+  'rejected',
+]);
 export const sessionModeSchema = z.enum(['new', 'resume']);
 
 const unknownObjectSchema = z.record(z.string(), z.unknown());
 
+const textMessagePartSchema = z.object({
+  type: z.literal('text'),
+  text: z.string().min(1),
+});
+
+const dataMessagePartSchema = z.object({
+  type: z.literal('data'),
+  data: unknownObjectSchema,
+});
+
+const fileMessagePartSchema = z.object({
+  type: z.literal('file'),
+  uri: z.string().min(1).optional(),
+  bytes_base64: z.string().min(1).optional(),
+  mime_type: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+});
+
+export const messagePartSchema = z.discriminatedUnion('type', [
+  textMessagePartSchema,
+  dataMessagePartSchema,
+  fileMessagePartSchema,
+]);
+
+export const agentMessageSchema = z.object({
+  role: z.enum(['user', 'agent', 'system']),
+  parts: z.array(messagePartSchema).min(1),
+  metadata: unknownObjectSchema.optional(),
+});
+
+export const remoteRefSchema = z.object({
+  provider: backendKindSchema,
+  conversation_id: z.string().nullable().optional(),
+  task_id: z.string().nullable().optional(),
+  context_id: z.string().nullable().optional(),
+  agent_url: z.string().nullable().optional(),
+  agent_name: z.string().nullable().optional(),
+  metadata: unknownObjectSchema.optional(),
+});
+
+export const taskArtifactSchema = z.object({
+  artifactId: z.string().min(1),
+  name: z.string().min(1).optional(),
+  description: z.string().min(1).optional(),
+  parts: z.array(messagePartSchema).min(1),
+  metadata: unknownObjectSchema.optional(),
+});
+
 export const spawnRunSchema = z
   .object({
     backend: backendKindSchema.describe(
-      'Backend to execute the run. Supported values are "codex" and "claude_code".',
+      'Backend to execute the run. Supported values are "codex", "claude_code", and "remote_a2a".',
     ),
     role: runRoleSchema.describe('Supervisor role for this run: planner, worker, or reviewer.'),
-    prompt: z.string().min(1).describe('Primary instruction for the coding agent run.'),
+    prompt: z.string().min(1).optional().describe('Primary instruction for the coding agent run.'),
+    input_message: agentMessageSchema
+      .optional()
+      .describe('Structured input message for multi-part or A2A-compatible runs.'),
     cwd: z
       .string()
       .min(1)
@@ -33,6 +93,9 @@ export const spawnRunSchema = z
     metadata: unknownObjectSchema
       .describe('Optional orchestration metadata for task/step correlation. It is stored but not interpreted by the MCP server.')
       .optional(),
+    backend_config: unknownObjectSchema
+      .describe('Optional backend-specific configuration, such as remote_a2a agent_url and auth headers.')
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (value.session_mode === 'resume' && !value.session_id) {
@@ -42,7 +105,26 @@ export const spawnRunSchema = z
         message: 'session_id is required when session_mode is resume',
       });
     }
+    if (!value.prompt && !value.input_message) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['prompt'],
+        message: 'Either prompt or input_message is required',
+      });
+    }
+    if (value.backend === 'remote_a2a' && !value.backend_config?.agent_url) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['backend_config', 'agent_url'],
+        message: 'backend_config.agent_url is required when backend is remote_a2a',
+      });
+    }
   });
+
+export const continueRunSchema = z.object({
+  run_id: z.string().min(1),
+  input_message: agentMessageSchema,
+});
 
 export const getRunSchema = z.object({
   run_id: z.string().min(1),
@@ -94,6 +176,7 @@ export const normalizedEventSchema = z.object({
     'run_started',
     'status_changed',
     'agent_message',
+    'message_added',
     'reasoning',
     'command_started',
     'command_updated',
@@ -101,7 +184,11 @@ export const normalizedEventSchema = z.object({
     'file_changed',
     'tool_started',
     'tool_finished',
+    'artifact_added',
     'todo_updated',
+    'input_required',
+    'auth_required',
+    'rejected',
     'run_completed',
     'run_failed',
   ]),
@@ -120,6 +207,7 @@ export const runSummarySchema = z.object({
   last_seq: z.number().int().min(0),
   cwd: z.string(),
   metadata: unknownObjectSchema,
+  remote_ref: remoteRefSchema.nullable(),
 });
 
 export const spawnRunResultSchema = z.object({
@@ -127,6 +215,11 @@ export const spawnRunResultSchema = z.object({
   backend: backendKindSchema,
   role: runRoleSchema,
   session_id: z.string(),
+  status: runStatusSchema,
+});
+
+export const continueRunResultSchema = z.object({
+  run_id: z.string(),
   status: runStatusSchema,
 });
 

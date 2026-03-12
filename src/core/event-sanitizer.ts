@@ -39,6 +39,11 @@ const PROTECTED_PATHS = new Set([
   '/file_path',
   '/backend_session_id',
   '/thread_id',
+  '/context_id',
+  '/task_id',
+  '/agent_url',
+  '/agent_name',
+  '/conversation_id',
   '/artifact_refs',
 ]);
 

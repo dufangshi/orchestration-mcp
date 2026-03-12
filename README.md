@@ -40,13 +40,16 @@ npm start
 - `get_run`
 - `poll_events`
 - `cancel_run`
+- `continue_run`
 - `list_runs`
 - `get_event_artifact`
 
 ## `spawn_run` notes
 
-- `backend`: `"codex"` or `"claude_code"`
+- `backend`: `"codex"`, `"claude_code"`, or `"remote_a2a"`
 - `role`: orchestration role label such as `planner`, `worker`, or `reviewer`
+- `prompt`: plain-text instruction for simple runs
+- `input_message`: optional structured message for multipart/A2A-style inputs
 - `cwd`: absolute working directory
 - `session_mode`: `new` or `resume`
 - `session_id`: required when resuming a prior session
@@ -56,6 +59,20 @@ Unless you are explicitly instructed to use a profile, leave `profile` empty.
 
 - `output_schema`: optional JSON Schema for structured final output
 - `metadata`: optional orchestration metadata stored for correlation and auditing
+- `backend_config`: optional backend-specific settings. For `remote_a2a`, set `agent_url` and any auth headers/tokens here.
+
+For `remote_a2a`, `spawn_run.cwd` also becomes the remote subagent execution directory for that A2A task context.
+
+At least one of `prompt` or `input_message` is required.
+
+## `continue_run` notes
+
+Use `continue_run` when a run enters `input_required` or `auth_required` and the backend supports interactive continuation.
+
+Inputs:
+
+- `run_id`
+- `input_message`
 
 ## `get_event_artifact` notes
 
@@ -79,8 +96,29 @@ Typical flow:
 
 - `codex`: uses the current `@openai/codex-sdk` defaults plus non-interactive execution settings already wired in the adapter
 - `claude_code`: uses `@anthropic-ai/claude-agent-sdk` with `permissionMode: "bypassPermissions"` so the MCP call stays non-blocking, and reuses persisted backend session ids for `resume`
+- `remote_a2a`: connects to a remote A2A-compatible agent using `@a2a-js/sdk`, streams task updates into normalized orchestration events, and supports `continue_run` for `input_required`
 
 For `claude_code`, make sure the local environment already has a working Claude Code authentication setup before testing.
+
+## Test A2A agents
+
+The repo includes helper modules for local A2A-wrapped test agents:
+
+- `dist/test-agents/codex-a2a-agent.js`
+- `dist/test-agents/claude-a2a-agent.js`
+- `dist/test-agents/start-a2a-agent.js`
+
+These export startup helpers that wrap the local Codex and Claude SDKs behind an A2A server so the orchestration MCP can test its internal `remote_a2a` backend against realistic subagents.
+
+To start an interactive wrapper launcher:
+
+```bash
+npm run start:a2a-agent
+```
+
+The script will ask whether to wrap `codex` or `claude_code`.
+
+After startup, it prints the `agent_url` and a ready-to-use `spawn_run` payload for the MCP layer. The wrapper no longer locks a working directory at startup. Each `remote_a2a` call uses the `cwd` provided to `spawn_run`, and the wrapper keeps that cwd fixed for the lifetime of the same A2A `contextId`.
 
 ## Storage
 
