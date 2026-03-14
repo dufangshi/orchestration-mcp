@@ -36,6 +36,7 @@ import { AsyncEventQueue } from '../adapters/async-event-queue.js';
 import { BaseRunAdapter } from '../adapters/base.js';
 import { attachOrchestrationMetadata } from '../core/a2a-metadata.js';
 import { summarizeMessageParts } from '../core/messages.js';
+import { injectSystemPromptIntoMessage } from '../core/profile.js';
 
 interface RemoteA2ABackendConfig {
   agentUrl: string;
@@ -175,7 +176,7 @@ class RemoteA2ARunHandle implements AdapterRunHandle {
         },
       });
 
-      let nextInput: AgentMessage | null = this.params.inputMessage;
+      let nextInput: AgentMessage | null = buildInitialInput(this.params);
       while (nextInput && !this.abortController.signal.aborted) {
         await this.processInput(nextInput);
         if (!this.waitingForInput) {
@@ -521,6 +522,13 @@ export class RemoteA2AAdapter extends BaseRunAdapter {
     }
     await handle.continue(input);
   }
+}
+
+function buildInitialInput(params: AdapterSpawnParams): AgentMessage {
+  if (!params.systemPrompt) {
+    return params.inputMessage;
+  }
+  return injectSystemPromptIntoMessage(params.inputMessage, params.systemPrompt);
 }
 
 function parseConfig(config: Record<string, unknown>): RemoteA2ABackendConfig {

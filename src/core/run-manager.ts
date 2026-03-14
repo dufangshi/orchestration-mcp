@@ -5,6 +5,7 @@ import { normalizeInputMessage, summarizeMessageParts } from './messages.js';
 import { normalizedEventSchema } from './schemas.js';
 import { attachArtifactRefs, sanitizeEvent } from './event-sanitizer.js';
 import { EventBuffer } from './event-buffer.js';
+import { formatProfileSystemPrompt, loadResolvedProfile } from './profile.js';
 import { SessionManager } from './session-manager.js';
 import { Storage } from './storage.js';
 import type {
@@ -70,6 +71,10 @@ export class RunManager {
       inputMessage: input.input_message,
     });
     const prompt = input.prompt ?? summarizeMessageParts(inputMessage.parts) ?? '[structured input]';
+    const resolvedProfile = await loadResolvedProfile(input.profile, input.cwd);
+    const systemPrompt = resolvedProfile
+      ? formatProfileSystemPrompt(resolvedProfile)
+      : undefined;
     const session =
       input.session_mode === 'resume'
         ? await this.loadResumeSession(input.cwd, input.backend, input.session_id ?? '')
@@ -102,6 +107,7 @@ export class RunManager {
       role: input.role,
       prompt,
       inputMessage,
+      systemPrompt,
       cwd: input.cwd,
       sessionMode: input.session_mode,
       session,

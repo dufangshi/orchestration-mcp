@@ -51,6 +51,13 @@ export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
       type: 'preset',
       preset: 'claude_code',
     },
+    systemPrompt: params.systemPrompt
+      ? {
+          type: 'preset',
+          preset: 'claude_code',
+          append: params.systemPrompt,
+        }
+      : undefined,
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     settingSources: ['user', 'project', 'local'],

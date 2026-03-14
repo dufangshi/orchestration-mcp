@@ -260,6 +260,7 @@ export interface AdapterSpawnParams {
   role: RunRole;
   prompt: string;
   inputMessage: AgentMessage;
+  systemPrompt?: string;
   cwd: string;
   sessionMode: SessionMode;
   session: SessionRecord;

@@ -2,6 +2,7 @@ import { Codex, type Thread, type ThreadEvent, type ThreadItem } from '@openai/c
 
 import { AsyncEventQueue } from './async-event-queue.js';
 import { BaseRunAdapter } from './base.js';
+import { injectSystemPromptIntoPrompt } from '../core/profile.js';
 import type {
   AdapterRunHandle,
   AdapterSpawnParams,
@@ -77,7 +78,7 @@ class CodexRunHandle implements AdapterRunHandle {
     });
 
     try {
-      const streamed = await this.thread.runStreamed(this.params.prompt, {
+      const streamed = await this.thread.runStreamed(buildCodexInput(this.params), {
         outputSchema: this.params.outputSchema,
         signal: this.abortController.signal,
       });
@@ -327,6 +328,13 @@ export class CodexAdapter extends BaseRunAdapter {
       handle.abort();
     }
   }
+}
+
+function buildCodexInput(params: AdapterSpawnParams): string {
+  if (!params.systemPrompt) {
+    return params.prompt;
+  }
+  return injectSystemPromptIntoPrompt(params.prompt, params.systemPrompt);
 }
 
 function parseStructuredOutput(text: string): unknown {

@@ -78,7 +78,7 @@ The server registers these tools:
 - `cwd`: absolute working directory
 - `session_mode`: `new` or `resume`
 - `session_id`: required when resuming a prior session
-- `profile`: optional path to a persona/job-description file for future profile-driven behavior
+- `profile`: optional path to a persona/job-description file. When provided, orchestration loads the file and injects it into the agent context. Backends with native system prompt support use it there; other backends prepend it to the run context.
 
 Unless you are explicitly instructed to use a profile, leave `profile` empty.
 
