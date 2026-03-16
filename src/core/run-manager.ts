@@ -556,8 +556,8 @@ function toGetRunResult(record: RunRecord): GetRunResult {
     summary: record.summary,
     last_seq: record.lastSeq,
     cwd: record.cwd,
-    metadata: record.metadata,
-    remote_ref: record.remoteRef,
+    metadata: record.metadata ?? {},
+    remote_ref: record.remoteRef ?? null,
   };
 }
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 
 import { RunManager } from '../dist/core/run-manager.js';
 
@@ -117,6 +117,34 @@ test('spawnRun does not persist orphaned queued runs when adapter spawn fails', 
 
   const listed = await manager.listRuns({ cwd });
   assert.equal(listed.runs.length, 0);
+});
+
+test('spawnRun loads profile content and passes it to adapters as systemPrompt', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-profile-'));
+  const profileDir = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-profile-file-'));
+  const profilePath = path.join(profileDir, 'reviewer.md');
+  await writeFile(profilePath, '# Reviewer\nAlways review only the latest diff.\n');
+
+  const adapter = new CapturingAdapter();
+  const manager = new RunManager([adapter]);
+
+  const spawned = await manager.spawnRun({
+    backend: 'codex',
+    role: 'reviewer',
+    prompt: 'Review the latest diff',
+    cwd,
+    session_mode: 'new',
+    profile: profilePath,
+  });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: spawned.run_id });
+    assert.equal(run.status, 'completed');
+  });
+
+  assert.equal(adapter.lastParams?.profile, profilePath);
+  assert.match(adapter.lastParams?.systemPrompt ?? '', /Profile source:/);
+  assert.match(adapter.lastParams?.systemPrompt ?? '', /Always review only the latest diff\./);
 });
 
 test('shutdown cancels active runs and persists terminal state', async () => {
@@ -307,6 +335,24 @@ class CompletingAdapter {
 
   async spawn(params) {
     return new CompletingHandle(params.session.sessionId, this.events);
+  }
+
+  async cancel() {}
+}
+
+class CapturingAdapter {
+  backend = 'codex';
+
+  async spawn(params) {
+    this.lastParams = params;
+    return new CompletingHandle(params.session.sessionId, [
+      {
+        type: 'run_completed',
+        data: {
+          final_response: 'done',
+        },
+      },
+    ]);
   }
 
   async cancel() {}

@@ -119,6 +119,25 @@ Remote A2A example:
 }
 ```
 
+## Reviewer workflow assets
+
+This repository includes a ready-to-use reviewer setup for multi-agent coding workflows:
+
+- profile: `./profile/reviewer-remediator.md`
+
+Recommended `spawn_run` usage for a reviewer run:
+
+```json
+{
+  "backend": "codex",
+  "role": "reviewer",
+  "cwd": "/abs/path/to/project",
+  "session_mode": "new",
+  "profile": "/abs/path/to/orchestration-mcp/profile/reviewer-remediator.md",
+  "prompt": "Review only the latest diff in the current working directory, apply low-risk fixes when clearly correct, validate them, and write a remediation report."
+}
+```
+
 ## `continue_run` notes
 
 Use `continue_run` when a run enters `input_required` or `auth_required` and the backend supports interactive continuation.

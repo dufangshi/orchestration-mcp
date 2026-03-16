@@ -1,4 +1,5 @@
-import { mkdir, appendFile, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, appendFile, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +15,9 @@ import type {
 
 const ROOT_DIR = '.nanobot-orchestrator';
 const ARTIFACT_CHUNK_BYTES = 64 * 1024;
+const REGISTRY_LOCK_RETRY_MS = 25;
+const REGISTRY_LOCK_TIMEOUT_MS = 5000;
+const REGISTRY_LOCK_STALE_MS = 30000;
 
 interface ArtifactChunkRecord {
   file: string;
@@ -313,27 +317,24 @@ export class Storage {
   }
 
   private async registerRun(cwd: string, runId: string): Promise<void> {
-    const registry = await this.readRegistry();
-    const nextEntry: RunRegistryEntry = {
-      cwd,
-      updated_at: new Date().toISOString(),
-    };
-    const currentEntry = registry.runs[runId];
-    if (currentEntry && currentEntry.cwd === nextEntry.cwd) {
-      registry.runs[runId] = nextEntry;
-    } else {
-      registry.runs[runId] = nextEntry;
-    }
-    await this.writeRegistry(registry);
+    await this.updateRegistry((registry) => {
+      registry.runs[runId] = {
+        cwd,
+        updated_at: new Date().toISOString(),
+      };
+      return registry;
+    });
   }
 
   private async readRegistry(): Promise<RunRegistry> {
+    const registryPath = this.getRegistryPath();
     try {
-      const raw = await readFile(this.getRegistryPath(), 'utf8');
-      const parsed = JSON.parse(raw) as Partial<RunRegistry>;
-      return {
-        runs: parsed.runs ?? {},
-      };
+      const raw = await readFile(registryPath, 'utf8');
+      const parsed = parseRegistryText(raw);
+      if (parsed.recovered) {
+        await this.writeRegistry(parsed.registry);
+      }
+      return parsed.registry;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { runs: {} };
@@ -345,7 +346,53 @@ export class Storage {
   private async writeRegistry(registry: RunRegistry): Promise<void> {
     const registryPath = this.getRegistryPath();
     await mkdir(path.dirname(registryPath), { recursive: true });
-    await writeJson(registryPath, registry);
+    await writeJsonAtomic(registryPath, registry);
+  }
+
+  private async updateRegistry(
+    updater: (registry: RunRegistry) => RunRegistry | Promise<RunRegistry>,
+  ): Promise<void> {
+    await this.withRegistryLock(async () => {
+      const registry = await this.readRegistry();
+      const nextRegistry = await updater(registry);
+      await this.writeRegistry(nextRegistry);
+    });
+  }
+
+  private async withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {
+    const lockPath = `${this.getRegistryPath()}.lock`;
+    const startedAt = Date.now();
+    await mkdir(path.dirname(lockPath), { recursive: true });
+
+    while (true) {
+      try {
+        await mkdir(lockPath);
+        break;
+      } catch (error) {
+        const errno = error as NodeJS.ErrnoException;
+        if (errno.code !== 'EEXIST') {
+          throw error;
+        }
+
+        const lockInfo = await stat(lockPath).catch(() => null);
+        if (lockInfo && Date.now() - lockInfo.mtimeMs > REGISTRY_LOCK_STALE_MS) {
+          await rm(lockPath, { recursive: true, force: true });
+          continue;
+        }
+
+        if (Date.now() - startedAt > REGISTRY_LOCK_TIMEOUT_MS) {
+          throw new Error(`Timed out acquiring registry lock: ${lockPath}`);
+        }
+
+        await sleep(REGISTRY_LOCK_RETRY_MS);
+      }
+    }
+
+    try {
+      return await fn();
+    } finally {
+      await rm(lockPath, { recursive: true, force: true });
+    }
   }
 
   private async readArtifactManifest(cwd: string, runId: string, seq: number): Promise<ArtifactManifest> {
@@ -418,4 +465,100 @@ function sanitizeArtifactName(value: string): string {
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}
 `, 'utf8');
+}
+
+async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  await writeJson(tempPath, value);
+  await rename(tempPath, filePath);
+}
+
+function parseRegistryText(raw: string): { registry: RunRegistry; recovered: boolean } {
+  const normalized = raw.trim();
+  if (!normalized) {
+    return {
+      registry: { runs: {} },
+      recovered: false,
+    };
+  }
+
+  try {
+    return {
+      registry: normalizeRegistry(JSON.parse(normalized) as Partial<RunRegistry>),
+      recovered: false,
+    };
+  } catch (error) {
+    const recovered = extractFirstJsonObject(normalized);
+    if (!recovered) {
+      throw error;
+    }
+    return {
+      registry: normalizeRegistry(JSON.parse(recovered) as Partial<RunRegistry>),
+      recovered: true,
+    };
+  }
+}
+
+function normalizeRegistry(parsed: Partial<RunRegistry>): RunRegistry {
+  return {
+    runs: parsed.runs ?? {},
+  };
+}
+
+function extractFirstJsonObject(raw: string): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let started = false;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (!started) {
+      if (/\s/.test(char)) {
+        continue;
+      }
+      if (char !== '{') {
+        return null;
+      }
+      started = true;
+      depth = 1;
+      continue;
+    }
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return raw.slice(0, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .nanobot-orchestrator/
+docs/live-command-finish-check.md
+test/profile.test.mjs
+profile/worker-implementer.md

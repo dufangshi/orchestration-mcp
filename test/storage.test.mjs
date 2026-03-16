@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 
 import { Storage } from '../dist/core/storage.js';
 
@@ -155,4 +155,41 @@ test('Storage can resolve runs and events by run_id through the global registry'
 
   const listed = await storage.listRunRecords({ cwd });
   assert.equal(listed.some((record) => record.runId === runRecord.runId), true);
+});
+
+test('Storage recovers from a malformed concatenated registry file', async () => {
+  const homeDir = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-storage-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-storage-recover-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = homeDir;
+
+  try {
+    const registryDir = path.join(homeDir, '.nanobot-orchestrator');
+    await mkdir(registryDir, { recursive: true });
+    await writeFile(
+      path.join(registryDir, 'registry.json'),
+      `{
+  "runs": {
+    "good-run": {
+      "cwd": "${cwd}",
+      "updated_at": "2026-03-13T00:00:00.000Z"
+    }
+  }
+}
+garbage-tail`,
+      'utf8',
+    );
+
+    const storage = new Storage();
+    assert.equal(await storage.resolveRunCwd('good-run'), cwd);
+
+    const healed = JSON.parse(await readFile(path.join(registryDir, 'registry.json'), 'utf8'));
+    assert.equal(healed.runs['good-run'].cwd, cwd);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+  }
 });

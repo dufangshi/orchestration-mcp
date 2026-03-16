@@ -17,6 +17,7 @@ test('buildClaudeOptions uses orchestration session ids for new and resume modes
   const newOptions = buildClaudeOptions({
     ...baseParams,
     sessionMode: 'new',
+    systemPrompt: 'Review only the latest diff.',
     session: {
       sessionId: 'session-1',
       backend: 'claude_code',
@@ -30,10 +31,16 @@ test('buildClaudeOptions uses orchestration session ids for new and resume modes
   assert.equal(newOptions.sessionId, 'session-1');
   assert.equal(newOptions.resume, undefined);
   assert.equal(newOptions.permissionMode, 'bypassPermissions');
+  assert.deepEqual(newOptions.systemPrompt, {
+    type: 'preset',
+    preset: 'claude_code',
+    append: 'Review only the latest diff.',
+  });
 
   const resumeOptions = buildClaudeOptions({
     ...baseParams,
     sessionMode: 'resume',
+    systemPrompt: undefined,
     session: {
       sessionId: 'session-1',
       backend: 'claude_code',
