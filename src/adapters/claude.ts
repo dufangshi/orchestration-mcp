@@ -44,14 +44,20 @@ interface ToolResultPayload {
   rawToolUseResult?: unknown;
 }
 
+function shouldForceClaudeFastMode(): boolean {
+  return Boolean(process.env.ANTHROPIC_AUTH_TOKEN) && Boolean(process.env.ANTHROPIC_BASE_URL);
+}
+
 export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
+  const shouldForceFastMode = shouldForceClaudeFastMode();
+
   return {
     cwd: params.cwd,
     tools: {
       type: 'preset',
       preset: 'claude_code',
     },
-    model: 'claude-opus-4-6',
+    model: shouldForceFastMode ? 'claude-opus-4-6' : undefined,
     systemPrompt: params.systemPrompt
       ? {
           type: 'preset',
@@ -62,9 +68,11 @@ export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     settingSources: ['user', 'project', 'local'],
-    settings: {
-      fastMode: true,
-    },
+    settings: shouldForceFastMode
+      ? {
+          fastMode: true,
+        }
+      : undefined,
     outputFormat: params.outputSchema
       ? {
           type: 'json_schema',
@@ -136,6 +144,7 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
       requested_model: requestedOptions.model ?? null,
       requested_fast_mode: requestedSettings?.fastMode === true,
       requested_setting_sources: requestedOptions.settingSources ?? [],
+      forced_fast_mode_override: requestedOptions.model === 'claude-opus-4-6',
     };
     if (this.params.session.backendSessionId) {
       runStartedData.backend_session_id = this.params.session.backendSessionId;
@@ -279,7 +288,7 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
             tools: message.tools,
             cwd: message.cwd,
             api_key_source: message.apiKeySource,
-            fast_mode_requested: true,
+            fast_mode_requested: shouldForceClaudeFastMode(),
             fast_mode_model_eligible: message.model.toLowerCase().includes('opus-4-6'),
           },
         });

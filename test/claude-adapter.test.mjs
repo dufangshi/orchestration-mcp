@@ -3,7 +3,39 @@ import assert from 'node:assert/strict';
 
 import { buildClaudeOptions, ClaudeCodeAdapter } from '../dist/adapters/claude.js';
 
-test('buildClaudeOptions uses orchestration session ids for new and resume modes', () => {
+const originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN;
+const originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
+
+function restoreClaudeEnv() {
+  if (originalAuthToken === undefined) {
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+  } else {
+    process.env.ANTHROPIC_AUTH_TOKEN = originalAuthToken;
+  }
+
+  if (originalBaseUrl === undefined) {
+    delete process.env.ANTHROPIC_BASE_URL;
+  } else {
+    process.env.ANTHROPIC_BASE_URL = originalBaseUrl;
+  }
+}
+
+function setClaudeEnv(enabled) {
+  if (enabled) {
+    process.env.ANTHROPIC_AUTH_TOKEN = 'test-token';
+    process.env.ANTHROPIC_BASE_URL = 'https://example.com';
+    return;
+  }
+
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.ANTHROPIC_BASE_URL;
+}
+
+test.afterEach(() => {
+  restoreClaudeEnv();
+});
+
+test('buildClaudeOptions enables forced fast mode only for direct auth envs', () => {
   const baseParams = {
     runId: 'run-1',
     role: 'worker',
@@ -15,7 +47,8 @@ test('buildClaudeOptions uses orchestration session ids for new and resume modes
     backendConfig: {},
   };
 
-  const newOptions = buildClaudeOptions({
+  setClaudeEnv(true);
+  const directAuthOptions = buildClaudeOptions({
     ...baseParams,
     sessionMode: 'new',
     systemPrompt: 'Review only the latest diff.',
@@ -29,20 +62,21 @@ test('buildClaudeOptions uses orchestration session ids for new and resume modes
       metadata: {},
     },
   });
-  assert.equal(newOptions.sessionId, 'session-1');
-  assert.equal(newOptions.resume, undefined);
-  assert.equal(newOptions.model, 'claude-opus-4-6');
-  assert.equal(newOptions.permissionMode, 'bypassPermissions');
-  assert.deepEqual(newOptions.settings, {
+  assert.equal(directAuthOptions.sessionId, 'session-1');
+  assert.equal(directAuthOptions.resume, undefined);
+  assert.equal(directAuthOptions.model, 'claude-opus-4-6');
+  assert.equal(directAuthOptions.permissionMode, 'bypassPermissions');
+  assert.deepEqual(directAuthOptions.settings, {
     fastMode: true,
   });
-  assert.deepEqual(newOptions.systemPrompt, {
+  assert.deepEqual(directAuthOptions.systemPrompt, {
     type: 'preset',
     preset: 'claude_code',
     append: 'Review only the latest diff.',
   });
 
-  const resumeOptions = buildClaudeOptions({
+  setClaudeEnv(false);
+  const oauthOptions = buildClaudeOptions({
     ...baseParams,
     sessionMode: 'resume',
     systemPrompt: undefined,
@@ -56,11 +90,15 @@ test('buildClaudeOptions uses orchestration session ids for new and resume modes
       metadata: {},
     },
   });
-  assert.equal(resumeOptions.sessionId, undefined);
-  assert.equal(resumeOptions.resume, 'backend-session-9');
+  assert.equal(oauthOptions.sessionId, undefined);
+  assert.equal(oauthOptions.resume, 'backend-session-9');
+  assert.equal(oauthOptions.model, undefined);
+  assert.equal(oauthOptions.settings, undefined);
 });
 
 test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', async () => {
+  setClaudeEnv(true);
+
   const adapter = new ClaudeCodeAdapter(({ options }) =>
     createFakeQuery([
       {
@@ -244,6 +282,7 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
   assert.equal(events[0].backend, 'claude_code');
   assert.equal(events[0].data.requested_model, 'claude-opus-4-6');
   assert.equal(events[0].data.requested_fast_mode, true);
+  assert.equal(events[0].data.forced_fast_mode_override, true);
   assert.deepEqual(events[0].data.requested_setting_sources, ['user', 'project', 'local']);
   assert.equal(events[2].data.backend_session_id, 'session-1');
   assert.equal(events[2].data.model, 'claude-opus-4-6');
@@ -265,6 +304,8 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
 
 
 test('ClaudeCodeAdapter ignores late result messages after abort', async () => {
+  setClaudeEnv(false);
+
   const adapter = new ClaudeCodeAdapter(() =>
     createDelayedFakeQuery([
       {
@@ -327,6 +368,8 @@ test('ClaudeCodeAdapter ignores late result messages after abort', async () => {
 });
 
 test('ClaudeCodeAdapter emits exactly one command_started when tool_progress arrives before tool_use', async () => {
+  setClaudeEnv(false);
+
   const adapter = new ClaudeCodeAdapter(() =>
     createFakeQuery([
       {
