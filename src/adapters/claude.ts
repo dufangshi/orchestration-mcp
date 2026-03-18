@@ -51,6 +51,7 @@ export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
       type: 'preset',
       preset: 'claude_code',
     },
+    model: 'claude-opus-4-6',
     systemPrompt: params.systemPrompt
       ? {
           type: 'preset',
@@ -61,6 +62,9 @@ export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     settingSources: ['user', 'project', 'local'],
+    settings: {
+      fastMode: true,
+    },
     outputFormat: params.outputSchema
       ? {
           type: 'json_schema',
@@ -123,7 +127,16 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
   }
 
   private async doRun(): Promise<void> {
-    const runStartedData: Record<string, unknown> = {};
+    const requestedOptions = buildClaudeOptions(this.params);
+    const requestedSettings =
+      requestedOptions.settings && typeof requestedOptions.settings === 'object'
+        ? requestedOptions.settings
+        : undefined;
+    const runStartedData: Record<string, unknown> = {
+      requested_model: requestedOptions.model ?? null,
+      requested_fast_mode: requestedSettings?.fastMode === true,
+      requested_setting_sources: requestedOptions.settingSources ?? [],
+    };
     if (this.params.session.backendSessionId) {
       runStartedData.backend_session_id = this.params.session.backendSessionId;
     }
@@ -265,6 +278,9 @@ class ClaudeCodeRunHandle implements AdapterRunHandle {
             model: message.model,
             tools: message.tools,
             cwd: message.cwd,
+            api_key_source: message.apiKeySource,
+            fast_mode_requested: true,
+            fast_mode_model_eligible: message.model.toLowerCase().includes('opus-4-6'),
           },
         });
         return;

@@ -12,6 +12,7 @@ test('buildClaudeOptions uses orchestration session ids for new and resume modes
     profile: undefined,
     outputSchema: undefined,
     metadata: {},
+    backendConfig: {},
   };
 
   const newOptions = buildClaudeOptions({
@@ -30,7 +31,11 @@ test('buildClaudeOptions uses orchestration session ids for new and resume modes
   });
   assert.equal(newOptions.sessionId, 'session-1');
   assert.equal(newOptions.resume, undefined);
+  assert.equal(newOptions.model, 'claude-opus-4-6');
   assert.equal(newOptions.permissionMode, 'bypassPermissions');
+  assert.deepEqual(newOptions.settings, {
+    fastMode: true,
+  });
   assert.deepEqual(newOptions.systemPrompt, {
     type: 'preset',
     preset: 'claude_code',
@@ -64,7 +69,7 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
         session_id: options.sessionId ?? 'backend-session-1',
         uuid: 'u-init',
         cwd: '/tmp/project',
-        model: 'claude-sonnet-4-6',
+        model: 'claude-opus-4-6',
         tools: ['Read', 'Edit', 'Bash'],
         mcp_servers: [],
         apiKeySource: 'user',
@@ -212,6 +217,7 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
       metadata: {},
     },
     metadata: {},
+    backendConfig: {},
   });
 
   const eventsPromise = collect(handle.eventStream);
@@ -236,8 +242,14 @@ test('ClaudeCodeAdapter maps streamed SDK messages into normalized events', asyn
     ],
   );
   assert.equal(events[0].backend, 'claude_code');
-  assert.deepEqual(events[0].data, {});
+  assert.equal(events[0].data.requested_model, 'claude-opus-4-6');
+  assert.equal(events[0].data.requested_fast_mode, true);
+  assert.deepEqual(events[0].data.requested_setting_sources, ['user', 'project', 'local']);
   assert.equal(events[2].data.backend_session_id, 'session-1');
+  assert.equal(events[2].data.model, 'claude-opus-4-6');
+  assert.equal(events[2].data.api_key_source, 'user');
+  assert.equal(events[2].data.fast_mode_requested, true);
+  assert.equal(events[2].data.fast_mode_model_eligible, true);
   assert.equal(events[3].data.command, 'npm test');
   assert.equal(events[4].data.tool, 'Read');
   assert.equal(events[5].data.command, 'npm test');
@@ -297,6 +309,7 @@ test('ClaudeCodeAdapter ignores late result messages after abort', async () => {
       metadata: {},
     },
     metadata: {},
+    backendConfig: {},
   });
 
   const eventsPromise = collect(handle.eventStream);
