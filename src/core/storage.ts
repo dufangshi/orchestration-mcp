@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 import type {
+  AgentInboxMessage,
   ArtifactRef,
   ArtifactWriteInstruction,
   GetEventArtifactResult,
@@ -74,6 +75,10 @@ export class Storage {
 
   getSessionPath(cwd: string, sessionId: string): string {
     return path.join(this.getSessionsDir(cwd), `${sessionId}.json`);
+  }
+
+  getSessionInboxPath(cwd: string, sessionId: string): string {
+    return path.join(this.getSessionsDir(cwd), `${sessionId}.inbox.jsonl`);
   }
 
   getRegistryPath(): string {
@@ -311,9 +316,97 @@ export class Storage {
     }
   }
 
+  async listSessionRecords(cwd?: string): Promise<SessionRecord[]> {
+    const allCwds = cwd ? [cwd] : await this.listKnownCwds();
+    const records: SessionRecord[] = [];
+    for (const itemCwd of allCwds) {
+      records.push(...(await this.readSessionRecordsForCwd(itemCwd)));
+    }
+    records.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    return records;
+  }
+
+  async appendInboxMessage(cwd: string, sessionId: string, message: Omit<AgentInboxMessage, 'seq'>): Promise<AgentInboxMessage> {
+    const sessionsDir = this.getSessionsDir(cwd);
+    await mkdir(sessionsDir, { recursive: true });
+    const inboxPath = this.getSessionInboxPath(cwd, sessionId);
+    const seq = await this.getNextInboxSeq(inboxPath);
+    const fullMessage: AgentInboxMessage = {
+      ...message,
+      seq,
+    };
+    await appendFile(inboxPath, `${JSON.stringify(fullMessage)}\n`, 'utf8');
+    return fullMessage;
+  }
+
+  async readInboxMessages(
+    cwd: string,
+    sessionId: string,
+    afterSeq: number,
+    limit: number,
+  ): Promise<AgentInboxMessage[]> {
+    try {
+      const raw = await readFile(this.getSessionInboxPath(cwd, sessionId), 'utf8');
+      return raw
+        .split(/\r?\n/)
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as AgentInboxMessage)
+        .filter((message) => message.seq > afterSeq)
+        .slice(0, limit);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
   async resolveRunCwd(runId: string): Promise<string | null> {
     const registry = await this.readRegistry();
     return registry.runs[runId]?.cwd ?? null;
+  }
+
+  private async listKnownCwds(): Promise<string[]> {
+    const registry = await this.readRegistry();
+    return [...new Set(Object.values(registry.runs).map((entry) => entry.cwd))].sort();
+  }
+
+  private async readSessionRecordsForCwd(cwd: string): Promise<SessionRecord[]> {
+    try {
+      const entries = await readdir(this.getSessionsDir(cwd), { withFileTypes: true });
+      const records = await Promise.all(
+        entries
+          .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && !entry.name.endsWith('.inbox.jsonl'))
+          .map(async (entry) => {
+            const raw = await readFile(path.join(this.getSessionsDir(cwd), entry.name), 'utf8');
+            return JSON.parse(raw) as SessionRecord;
+          }),
+      );
+      records.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      return records;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  private async getNextInboxSeq(inboxPath: string): Promise<number> {
+    try {
+      const raw = await readFile(inboxPath, 'utf8');
+      const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      if (lines.length === 0) {
+        return 1;
+      }
+      const last = JSON.parse(lines.at(-1) ?? '{}') as Partial<AgentInboxMessage>;
+      return typeof last.seq === 'number' ? last.seq + 1 : 1;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 1;
+      }
+      throw error;
+    }
   }
 
   private async registerRun(cwd: string, runId: string): Promise<void> {

@@ -12,14 +12,16 @@ test('SessionManager creates, reloads, and updates session records', async () =>
   const storage = new Storage();
   const sessions = new SessionManager(storage);
 
-  const created = await sessions.createNew(cwd, 'codex', { task: 'audit' });
+  const created = await sessions.createNew(cwd, 'codex', 'worker1', { task: 'audit' });
   assert.equal(created.cwd, cwd);
   assert.equal(created.backend, 'codex');
+  assert.equal(created.agentName, 'worker1');
   assert.equal(created.metadata.task, 'audit');
 
   const reloadedManager = new SessionManager(storage);
   const loaded = await reloadedManager.getExisting(cwd, created.sessionId);
   assert.equal(loaded?.sessionId, created.sessionId);
+  assert.equal(loaded?.agentName, 'worker1');
   assert.equal(loaded?.metadata.task, 'audit');
 
   loaded.backendSessionId = 'backend-thread-1';

@@ -8,6 +8,7 @@ import {
 
 import { AsyncEventQueue } from './async-event-queue.js';
 import { BaseRunAdapter } from './base.js';
+import { buildPeerEnvironment } from '../core/peer-env.js';
 import type {
   AdapterRunHandle,
   AdapterSpawnParams,
@@ -79,6 +80,7 @@ export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
           schema: params.outputSchema,
         }
       : undefined,
+    env: buildPeerEnvironment(params),
     resume:
       params.sessionMode === 'resume' && params.session.backendSessionId
         ? params.session.backendSessionId

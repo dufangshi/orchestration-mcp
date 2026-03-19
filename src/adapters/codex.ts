@@ -2,6 +2,7 @@ import { Codex, type Thread, type ThreadEvent, type ThreadItem } from '@openai/c
 
 import { AsyncEventQueue } from './async-event-queue.js';
 import { BaseRunAdapter } from './base.js';
+import { buildPeerEnvironment } from '../core/peer-env.js';
 import { injectSystemPromptIntoPrompt } from '../core/profile.js';
 import type {
   AdapterRunHandle,
@@ -306,7 +307,9 @@ export class CodexAdapter extends BaseRunAdapter {
   readonly backend = 'codex' as const;
 
   async spawn(params: AdapterSpawnParams): Promise<AdapterRunHandle> {
-    const codex = new Codex();
+    const codex = new Codex({
+      env: buildPeerEnvironment(params),
+    });
     const threadOptions = {
       workingDirectory: params.cwd,
       skipGitRepoCheck: true,

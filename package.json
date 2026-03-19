@@ -4,6 +4,9 @@
   "description": "Local MCP server for orchestrating external coding agent runs",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "peer": "./peer"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",

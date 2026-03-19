@@ -11,6 +11,7 @@ export class SessionManager {
   async createNew(
     cwd: string,
     backend: BackendKind,
+    agentName: string,
     metadata: Record<string, unknown>,
   ): Promise<SessionRecord> {
     const now = new Date().toISOString();
@@ -18,6 +19,7 @@ export class SessionManager {
       sessionId: randomUUID(),
       backend,
       cwd,
+      agentName,
       backendSessionId: null,
       remoteRef: null,
       createdAt: now,

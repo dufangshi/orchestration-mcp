@@ -138,14 +138,16 @@ test('local A2A wrapper uses spawn_run.cwd as backend working directory', async 
     assert.equal(backend.spawnCalls.length, 1);
     assert.equal(backend.spawnCalls[0].cwd, cwd);
 
-    const events = await manager.pollEvents({
-      run_id: spawned.run_id,
-      after_seq: 0,
-      limit: 50,
-      wait_ms: 0,
+    await waitFor(async () => {
+      const events = await manager.pollEvents({
+        run_id: spawned.run_id,
+        after_seq: 0,
+        limit: 50,
+        wait_ms: 0,
+      });
+      const completed = events.events.find((event) => event.type === 'run_completed');
+      assert.equal(completed?.data.final_response, `cwd:${cwd}`);
     });
-    const completed = events.events.find((event) => event.type === 'run_completed');
-    assert.equal(completed.data.final_response, `cwd:${cwd}`);
   } finally {
     await a2aServer.close();
   }

@@ -6,10 +6,13 @@ import { RemoteA2AAdapter } from './backends/remote-a2a.js';
 import { RunManager } from './core/run-manager.js';
 import { registerCancelRunTool } from './tools/cancel-run.js';
 import { registerContinueRunTool } from './tools/continue-run.js';
+import { registerFetchAgentMessagesTool } from './tools/fetch-agent-messages.js';
 import { registerGetEventArtifactTool } from './tools/get-event-artifact.js';
 import { registerGetRunTool } from './tools/get-run.js';
+import { registerListAgentsTool } from './tools/list-agents.js';
 import { registerListRunsTool } from './tools/list-runs.js';
 import { registerPollEventsTool } from './tools/poll-events.js';
+import { registerSendAgentMessageTool } from './tools/send-agent-message.js';
 import { registerSpawnRunTool } from './tools/spawn-run.js';
 
 export function createDefaultManager(): RunManager {
@@ -30,6 +33,9 @@ export function createServer(options?: { manager?: RunManager }): McpServer {
   registerCancelRunTool(server, manager);
   registerContinueRunTool(server, manager);
   registerListRunsTool(server, manager);
+  registerListAgentsTool(server, manager);
+  registerSendAgentMessageTool(server, manager);
+  registerFetchAgentMessagesTool(server, manager);
   registerGetEventArtifactTool(server, manager);
 
   return server;

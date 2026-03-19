@@ -1,0 +1,11 @@
+#!/bin/sh
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+TARGET="$SCRIPT_DIR/dist/cli/peer.js"
+
+if [ ! -f "$TARGET" ]; then
+  echo "peer CLI is not built. Run npm run build." >&2
+  exit 1
+fi
+
+exec node "$TARGET" "$@"

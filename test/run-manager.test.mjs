@@ -147,6 +147,366 @@ test('spawnRun loads profile content and passes it to adapters as systemPrompt',
   assert.match(adapter.lastParams?.systemPrompt ?? '', /Always review only the latest diff\./);
 });
 
+test('spawnRun assigns explicit nicknames and preserves them across resume runs', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-name-explicit-'));
+  const adapter = new SessionQueueAdapter();
+  const manager = new RunManager([adapter]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker1',
+    prompt: 'first',
+    cwd,
+    session_mode: 'new',
+  });
+
+  assert.equal(first.agent_name, 'worker1');
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'running');
+    assert.equal(run.agent_name, 'worker1');
+  });
+
+  const second = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'resume',
+    cwd,
+    session_mode: 'resume',
+    session_id: first.session_id,
+  });
+
+  assert.equal(second.agent_name, 'worker1');
+
+  await assert.rejects(
+    manager.spawnRun({
+      backend: 'codex',
+      role: 'worker',
+      nickname: 'worker2',
+      prompt: 'rename attempt',
+      cwd,
+      session_mode: 'resume',
+      session_id: first.session_id,
+    }),
+    /already named worker1, not worker2/,
+  );
+
+  await manager.cancelRun({ run_id: second.run_id });
+  await manager.shutdown(1000);
+});
+
+test('spawnRun auto-generates unique agent names for new sessions', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-name-default-'));
+  const manager = new RunManager([new HangingAdapter()]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'first',
+    cwd,
+    session_mode: 'new',
+  });
+  const second = await manager.spawnRun({
+    backend: 'codex',
+    role: 'reviewer',
+    prompt: 'second',
+    cwd,
+    session_mode: 'new',
+  });
+
+  assert.equal(first.agent_name, 'agent1');
+  assert.equal(second.agent_name, 'agent2');
+
+  const firstRun = await manager.getRun({ run_id: first.run_id });
+  const secondRun = await manager.getRun({ run_id: second.run_id });
+  assert.equal(firstRun.agent_name, 'agent1');
+  assert.equal(secondRun.agent_name, 'agent2');
+
+  const listed = await manager.listRuns({ cwd });
+  assert.equal(listed.runs.some((run) => run.agent_name === 'agent1'), true);
+  assert.equal(listed.runs.some((run) => run.agent_name === 'agent2'), true);
+
+  await manager.shutdown(1000);
+});
+
+test('spawnRun rejects duplicate nicknames for new sessions', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-name-duplicate-'));
+  const manager = new RunManager([new HangingAdapter()]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'reviewer1',
+    prompt: 'first',
+    cwd,
+    session_mode: 'new',
+  });
+
+  assert.equal(first.agent_name, 'reviewer1');
+
+  await assert.rejects(
+    manager.spawnRun({
+      backend: 'codex',
+      role: 'worker',
+      nickname: 'reviewer1',
+      prompt: 'second',
+      cwd,
+      session_mode: 'new',
+    }),
+    /already in use: reviewer1/,
+  );
+
+  await manager.shutdown(1000);
+});
+
+test('RunManager sends and fetches session inbox messages by agent_name', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-message-'));
+  const manager = new RunManager([new HangingAdapter()]);
+
+  await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker1',
+    prompt: 'worker',
+    cwd,
+    session_mode: 'new',
+  });
+  const reviewer = await manager.spawnRun({
+    backend: 'codex',
+    role: 'reviewer',
+    nickname: 'reviewer1',
+    prompt: 'reviewer',
+    cwd,
+    session_mode: 'new',
+  });
+
+  const sent = await manager.sendAgentMessage({
+    cwd,
+    from_agent_name: 'worker1',
+    to_agent_name: 'reviewer1',
+    message: {
+      role: 'user',
+      parts: [{ type: 'text', text: 'Please review the latest revision.' }],
+    },
+    metadata: { revision: 3 },
+  });
+
+  assert.equal(sent.to_agent_name, 'reviewer1');
+  assert.equal(sent.seq, 1);
+
+  const firstFetch = await manager.fetchAgentMessages({
+    cwd,
+    agent_name: 'reviewer1',
+    after_seq: 0,
+    limit: 10,
+  });
+  assert.equal(firstFetch.session_id, reviewer.session_id);
+  assert.equal(firstFetch.messages.length, 1);
+  assert.equal(firstFetch.messages[0].from_agent_name, 'worker1');
+  assert.equal(firstFetch.messages[0].metadata.revision, 3);
+  assert.equal(firstFetch.next_after_seq, 1);
+
+  await manager.sendAgentMessage({
+    cwd,
+    to_agent_name: 'reviewer1',
+    message: {
+      role: 'system',
+      parts: [{ type: 'text', text: 'A final review is required before completion.' }],
+    },
+  });
+
+  const secondFetch = await manager.fetchAgentMessages({
+    cwd,
+    agent_name: 'reviewer1',
+    after_seq: firstFetch.next_after_seq,
+    limit: 10,
+  });
+  assert.equal(secondFetch.messages.length, 1);
+  assert.equal(secondFetch.messages[0].seq, 2);
+  assert.equal(secondFetch.messages[0].from_agent_name, null);
+  assert.equal(secondFetch.next_after_seq, 2);
+
+  await assert.rejects(
+    manager.sendAgentMessage({
+      cwd,
+      to_agent_name: 'missing-agent',
+      message: {
+        role: 'user',
+        parts: [{ type: 'text', text: 'hello' }],
+      },
+    }),
+    /Unknown agent_name/,
+  );
+
+  await manager.shutdown(1000);
+});
+
+test('listAgents returns stable agent directory entries', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-directory-'));
+  const adapter = new SessionQueueAdapter();
+  const manager = new RunManager([adapter]);
+
+  const worker = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker1',
+    prompt: 'worker',
+    cwd,
+    session_mode: 'new',
+  });
+  const reviewer = await manager.spawnRun({
+    backend: 'codex',
+    role: 'reviewer',
+    prompt: 'reviewer',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await waitFor(async () => {
+    const workerRun = await manager.getRun({ run_id: worker.run_id });
+    const reviewerRun = await manager.getRun({ run_id: reviewer.run_id });
+    assert.equal(workerRun.status, 'running');
+    assert.equal(reviewerRun.status, 'running');
+  });
+
+  const listed = await manager.listAgents({ cwd });
+  assert.equal(listed.agents.length, 2);
+  assert.deepEqual(
+    listed.agents.map((agent) => agent.agent_name).sort(),
+    [reviewer.agent_name, worker.agent_name].sort(),
+  );
+
+  const workerEntry = listed.agents.find((agent) => agent.agent_name === 'worker1');
+  assert.equal(workerEntry?.role, 'worker');
+  assert.equal(workerEntry?.status, 'running');
+  assert.equal(workerEntry?.last_run_id, worker.run_id);
+  assert.equal(workerEntry?.cwd, cwd);
+
+  const reviewerEntry = listed.agents.find((agent) => agent.agent_name === reviewer.agent_name);
+  assert.equal(reviewerEntry?.role, 'reviewer');
+  assert.equal(reviewerEntry?.status, 'running');
+
+  adapter.handles[0].complete();
+  adapter.handles[1].complete();
+  await manager.shutdown(1000);
+});
+
+test('resume runs on the same session are queued until the active run finishes', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-session-queue-'));
+  const adapter = new SessionQueueAdapter();
+  const manager = new RunManager([adapter]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'first',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'running');
+    assert.equal(run.last_seq, 1);
+  });
+
+  const second = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'second',
+    cwd,
+    session_mode: 'resume',
+    session_id: first.session_id,
+  });
+
+  assert.equal(second.status, 'queued');
+  assert.deepEqual(adapter.spawnedRunIds, [first.run_id]);
+
+  const queuedRun = await manager.getRun({ run_id: second.run_id });
+  assert.equal(queuedRun.status, 'queued');
+  assert.equal(queuedRun.summary, 'Run queued behind active session run');
+
+  const queuedPoll = await manager.pollEvents({
+    run_id: second.run_id,
+    after_seq: 0,
+    limit: 10,
+    wait_ms: 10,
+  });
+  assert.equal(queuedPoll.status, 'queued');
+  assert.equal(queuedPoll.events.length, 0);
+
+  adapter.handles[0].complete();
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'completed');
+  });
+
+  await waitFor(() => {
+    assert.deepEqual(adapter.spawnedRunIds, [first.run_id, second.run_id]);
+  });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: second.run_id });
+    assert.equal(run.status, 'running');
+    assert.equal(run.last_seq, 1);
+  });
+
+  adapter.handles[1].complete();
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: second.run_id });
+    assert.equal(run.status, 'completed');
+  });
+});
+
+test('cancelRun removes queued session resumes before they start', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-session-cancel-'));
+  const adapter = new SessionQueueAdapter();
+  const manager = new RunManager([adapter]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'first',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'running');
+  });
+
+  const second = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'second',
+    cwd,
+    session_mode: 'resume',
+    session_id: first.session_id,
+  });
+
+  const cancelled = await manager.cancelRun({ run_id: second.run_id });
+  assert.equal(cancelled.status, 'cancelled');
+
+  const cancelledRun = await manager.getRun({ run_id: second.run_id });
+  assert.equal(cancelledRun.status, 'cancelled');
+  assert.equal(cancelledRun.last_seq, 1);
+
+  adapter.handles[0].complete();
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'completed');
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(adapter.spawnedRunIds, [first.run_id]);
+});
+
 test('shutdown cancels active runs and persists terminal state', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-shutdown-'));
   const manager = new RunManager([new HangingAdapter()]);
@@ -216,9 +576,11 @@ test('RunManager can read historical runs and artifacts back from disk', async (
   });
 
   const historicalManager = new RunManager([]);
-  const historicalRun = await historicalManager.getRun({ run_id: spawned.run_id });
-  assert.equal(historicalRun.status, 'completed');
-  assert.equal(historicalRun.cwd, cwd);
+  await waitFor(async () => {
+    const historicalRun = await historicalManager.getRun({ run_id: spawned.run_id });
+    assert.equal(historicalRun.status, 'completed');
+    assert.equal(historicalRun.cwd, cwd);
+  });
 
   const polled = await historicalManager.pollEvents({
     run_id: spawned.run_id,
@@ -358,6 +720,29 @@ class CapturingAdapter {
   async cancel() {}
 }
 
+class SessionQueueAdapter {
+  backend = 'codex';
+
+  constructor() {
+    this.handles = [];
+    this.spawnedRunIds = [];
+  }
+
+  async spawn(params) {
+    const handle = new SessionQueueHandle(
+      params.session.sessionId,
+      params.session.backendSessionId ?? `thread-${params.session.sessionId}`,
+    );
+    this.handles.push(handle);
+    this.spawnedRunIds.push(params.runId);
+    return handle;
+  }
+
+  async cancel(handle) {
+    handle.abort();
+  }
+}
+
 class HangingHandle {
   constructor(sessionId) {
     this.sessionId = sessionId;
@@ -382,6 +767,69 @@ class HangingHandle {
 
   abort() {
     this.resolveRun();
+  }
+}
+
+class SessionQueueHandle {
+  constructor(sessionId, threadId) {
+    this.sessionId = sessionId;
+    this.threadId = threadId;
+    this.result = {
+      finalResponse: 'done',
+    };
+    this.completed = false;
+    this.aborted = false;
+    this.eventStream = (async function* (self) {
+      yield {
+        seq: 0,
+        ts: new Date().toISOString(),
+        run_id: '',
+        session_id: sessionId,
+        backend: 'codex',
+        type: 'run_started',
+        data: {
+          thread_id: self.threadId,
+        },
+      };
+      while (!self.completed && !self.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      if (!self.aborted) {
+        yield {
+          seq: 0,
+          ts: new Date().toISOString(),
+          run_id: '',
+          session_id: sessionId,
+          backend: 'codex',
+          type: 'run_completed',
+          data: {
+            final_response: 'done',
+          },
+        };
+      }
+    })(this);
+  }
+
+  async run() {
+    while (!this.completed && !this.aborted) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+
+  getSummary() {
+    return this.completed ? 'Completed run' : 'Queued session run';
+  }
+
+  getResult() {
+    return this.completed ? this.result : null;
+  }
+
+  complete() {
+    this.completed = true;
+  }
+
+  abort() {
+    this.aborted = true;
   }
 }
 

@@ -9,17 +9,25 @@ import { formatProfileSystemPrompt, loadResolvedProfile } from './profile.js';
 import { SessionManager } from './session-manager.js';
 import { Storage } from './storage.js';
 import type {
+  AgentDirectoryEntry,
+  AgentDirectoryStatus,
+  AgentInboxMessage,
   AgentMessage,
   AdapterRunHandle,
+  AdapterSpawnParams,
   BackendKind,
   CancelRunInput,
   CancelRunResult,
   ContinueRunInput,
   ContinueRunResult,
+  FetchAgentMessagesInput,
+  FetchAgentMessagesResult,
   GetEventArtifactInput,
   GetEventArtifactResult,
   GetRunInput,
   GetRunResult,
+  ListAgentsInput,
+  ListAgentsResult,
   ListRunsInput,
   ListRunsResult,
   NormalizedEvent,
@@ -29,6 +37,9 @@ import type {
   RunRecord,
   RunStatus,
   SessionRecord,
+  SendAgentMessageInput,
+  SendAgentMessageResult,
+  SessionMode,
   SpawnRunInput,
   SpawnRunResult,
 } from './types.js';
@@ -37,9 +48,12 @@ interface ManagedRun {
   record: RunRecord;
   session: SessionRecord;
   adapter: RunAdapter;
-  handle: AdapterRunHandle;
+  spawnParams: AdapterSpawnParams;
+  handle: AdapterRunHandle | null;
   buffer: EventBuffer;
   task: Promise<void>;
+  starting: boolean;
+  cancelRequested: boolean;
 }
 
 export class RunManager {
@@ -47,6 +61,8 @@ export class RunManager {
   private readonly sessions = new SessionManager(this.storage);
   private readonly adapters = new Map<BackendKind, RunAdapter>();
   private readonly runs = new Map<string, ManagedRun>();
+  private readonly activeRunsBySession = new Map<string, string>();
+  private readonly queuedRunsBySession = new Map<string, ManagedRun[]>();
 
   constructor(adapters: RunAdapter[]) {
     for (const adapter of adapters) {
@@ -78,7 +94,16 @@ export class RunManager {
     const session =
       input.session_mode === 'resume'
         ? await this.loadResumeSession(input.cwd, input.backend, input.session_id ?? '')
-        : await this.sessions.createNew(input.cwd, input.backend, metadata);
+        : await this.sessions.createNew(
+            input.cwd,
+            input.backend,
+            await this.resolveNewAgentName(input.cwd, input.nickname),
+            metadata,
+          );
+    const agentName =
+      input.session_mode === 'resume'
+        ? await this.resolveResumeAgentName(session, input.nickname)
+        : getSessionAgentName(session);
 
     const now = new Date().toISOString();
     const runId = randomUUID();
@@ -87,6 +112,7 @@ export class RunManager {
       backend: input.backend,
       role: input.role,
       sessionId: session.sessionId,
+      agentName,
       status: 'queued',
       cwd: input.cwd,
       prompt,
@@ -102,7 +128,7 @@ export class RunManager {
       error: null,
     };
 
-    const handle = await adapter.spawn({
+    const spawnParams: AdapterSpawnParams = {
       runId,
       role: input.role,
       prompt,
@@ -115,28 +141,55 @@ export class RunManager {
       outputSchema: input.output_schema,
       metadata,
       backendConfig: input.backend_config ?? {},
-    });
+    };
 
     const managed: ManagedRun = {
       record,
       session,
       adapter,
-      handle,
+      spawnParams,
+      handle: null,
       buffer: new EventBuffer(),
       task: Promise.resolve(),
+      starting: false,
+      cancelRequested: false,
     };
+
+    const shouldQueue = this.shouldQueueSessionRun(input.session_mode, session);
+    if (shouldQueue) {
+      managed.record.summary = 'Run queued behind active session run';
+      this.runs.set(runId, managed);
+      await this.storage.writeRunRecord(record);
+      this.enqueueRunForSession(managed);
+      return {
+        run_id: runId,
+        backend: record.backend,
+        role: record.role,
+        session_id: record.sessionId,
+        agent_name: agentName,
+        status: record.status,
+      };
+    }
+
+    const sessionKey = this.getSessionKey(session);
+    this.claimSessionRun(sessionKey, runId);
+    try {
+      managed.handle = await adapter.spawn(spawnParams);
+    } catch (error) {
+      this.releaseSessionRun(sessionKey, runId);
+      throw error;
+    }
 
     this.runs.set(runId, managed);
     await this.storage.writeRunRecord(record);
-    managed.task = this.runManaged(managed).catch(async (error) => {
-      await this.markRunFailed(managed, String(error));
-    });
+    this.scheduleManagedRun(managed);
 
     return {
       run_id: runId,
       backend: record.backend,
       role: record.role,
       session_id: record.sessionId,
+      agent_name: agentName,
       status: record.status,
     };
   }
@@ -164,6 +217,9 @@ export class RunManager {
     }
     if (managed.record.status !== 'input_required' && managed.record.status !== 'auth_required') {
       throw new Error(`run is not awaiting additional input: ${managed.record.status}`);
+    }
+    if (!managed.handle) {
+      throw new Error(`run has not started yet: ${managed.record.status}`);
     }
     const continueFn = managed.adapter.continue ?? managed.handle.continue;
     if (!continueFn) {
@@ -240,6 +296,15 @@ export class RunManager {
       throw new Error(`run is already terminal: ${managed.record.status}`);
     }
 
+    if (!managed.handle) {
+      await this.cancelQueuedRun(managed);
+      return {
+        run_id: managed.record.runId,
+        status: managed.record.status,
+        cancelled_at: managed.record.completedAt ?? new Date().toISOString(),
+      };
+    }
+
     await managed.adapter.cancel(managed.handle);
     const cancelledAt = new Date().toISOString();
     const event = this.prepareEvent(managed, {
@@ -286,22 +351,11 @@ export class RunManager {
   }
 
   async listRuns(input: ListRunsInput): Promise<ListRunsResult> {
-    const liveRecords = [...this.runs.values()].map((managed) => managed.record);
-    const persistedRecords = await this.storage.listRunRecords({
+    const runs = (await this.collectMergedRunRecords({
       cwd: input.cwd,
       backend: input.backend,
       status: input.status,
-    });
-
-    const merged = new Map<string, RunRecord>();
-    for (const record of persistedRecords) {
-      merged.set(record.runId, record);
-    }
-    for (const record of liveRecords) {
-      merged.set(record.runId, record);
-    }
-
-    const runs = [...merged.values()]
+    }))
       .filter((record) => {
         if (input.status && record.status !== input.status) {
           return false;
@@ -320,10 +374,98 @@ export class RunManager {
     return { runs };
   }
 
+  async sendAgentMessage(input: SendAgentMessageInput): Promise<SendAgentMessageResult> {
+    const sender = input.from_agent_name
+      ? await this.resolveAgentSession(input.from_agent_name, input.cwd)
+      : null;
+    const resolutionCwd = input.cwd ?? sender?.cwd;
+    if (sender && resolutionCwd && sender.cwd !== resolutionCwd) {
+      throw new Error(`Cross-cwd agent messaging is not supported: ${sender.cwd} -> ${resolutionCwd}`);
+    }
+    const recipient = await this.resolveAgentSession(input.to_agent_name, resolutionCwd);
+    const createdAt = new Date().toISOString();
+    const stored = await this.storage.appendInboxMessage(recipient.cwd, recipient.sessionId, {
+      message_id: randomUUID(),
+      from_agent_name: sender?.agentName ?? null,
+      from_session_id: sender?.sessionId ?? null,
+      to_agent_name: getSessionAgentName(recipient),
+      to_session_id: recipient.sessionId,
+      created_at: createdAt,
+      body: input.message,
+      metadata: input.metadata ?? {},
+    });
+    return {
+      message_id: stored.message_id,
+      to_agent_name: stored.to_agent_name,
+      to_session_id: stored.to_session_id,
+      seq: stored.seq,
+      created_at: stored.created_at,
+    };
+  }
+
+  async fetchAgentMessages(input: FetchAgentMessagesInput): Promise<FetchAgentMessagesResult> {
+    const session = await this.resolveAgentSession(input.agent_name, input.cwd);
+    const messages = await this.storage.readInboxMessages(
+      session.cwd,
+      session.sessionId,
+      input.after_seq ?? 0,
+      input.limit ?? 100,
+    );
+    return {
+      agent_name: getSessionAgentName(session),
+      session_id: session.sessionId,
+      messages,
+      next_after_seq: messages.at(-1)?.seq ?? (input.after_seq ?? 0),
+    };
+  }
+
+  async listAgents(input: ListAgentsInput): Promise<ListAgentsResult> {
+    const sessions = await this.storage.listSessionRecords(input.cwd);
+    const mergedRuns = await this.collectMergedRunRecords({
+      cwd: input.cwd,
+      backend: input.backend,
+    });
+    const runsBySession = new Map<string, RunRecord[]>();
+    for (const record of mergedRuns) {
+      const existing = runsBySession.get(record.sessionId) ?? [];
+      existing.push(record);
+      runsBySession.set(record.sessionId, existing);
+    }
+
+    const agents: AgentDirectoryEntry[] = [];
+    for (const session of sessions) {
+      if (input.backend && session.backend !== input.backend) {
+        continue;
+      }
+      const namedSession = await this.ensureSessionAgentName(session);
+      const selectedRun = selectAgentDirectoryRun(runsBySession.get(session.sessionId) ?? []);
+      const entry: AgentDirectoryEntry = {
+        agent_name: getSessionAgentName(namedSession),
+        role: selectedRun?.role ?? null,
+        session_id: namedSession.sessionId,
+        status: selectedRun?.status ?? 'idle',
+        cwd: namedSession.cwd,
+        last_run_id: selectedRun?.runId ?? null,
+        updated_at: selectedRun?.updatedAt ?? namedSession.updatedAt,
+      };
+      if (input.status && entry.status !== input.status) {
+        continue;
+      }
+      agents.push(entry);
+    }
+
+    agents.sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+    return { agents };
+  }
+
   async shutdown(timeoutMs = 5000): Promise<void> {
     const activeRuns = [...this.runs.values()].filter((managed) => !isTerminalStatus(managed.record.status));
     for (const managed of activeRuns) {
       try {
+        if (!managed.handle) {
+          await this.cancelQueuedRun(managed, 'shutdown');
+          continue;
+        }
         await managed.adapter.cancel(managed.handle);
         const cancelledAt = new Date().toISOString();
         const event = this.prepareEvent(managed, {
@@ -370,14 +512,162 @@ export class RunManager {
     return session;
   }
 
+  private async resolveNewAgentName(cwd: string, nickname: string | undefined): Promise<string> {
+    const requestedName = normalizeAgentNameInput(nickname);
+    if (requestedName) {
+      await this.assertAgentNameAvailable(cwd, requestedName);
+      return requestedName;
+    }
+    return this.generateDefaultAgentName(cwd);
+  }
+
+  private async resolveResumeAgentName(
+    session: SessionRecord,
+    nickname: string | undefined,
+  ): Promise<string> {
+    const agentName = getSessionAgentName(await this.ensureSessionAgentName(session));
+
+    const requestedName = normalizeAgentNameInput(nickname);
+    if (requestedName && requestedName !== agentName) {
+      throw new Error(`Session ${session.sessionId} is already named ${agentName}, not ${requestedName}`);
+    }
+    return agentName;
+  }
+
+  private async ensureSessionAgentName(session: SessionRecord): Promise<SessionRecord> {
+    if (session.agentName) {
+      return session;
+    }
+    session.agentName = await this.generateDefaultAgentName(session.cwd, session.sessionId);
+    await this.sessions.update(session);
+    return session;
+  }
+
+  private async generateDefaultAgentName(cwd: string, excludeSessionId?: string): Promise<string> {
+    const knownNames = await this.collectKnownAgentNames(cwd, excludeSessionId);
+    let index = 1;
+    while (knownNames.has(`agent${index}`)) {
+      index += 1;
+    }
+    return `agent${index}`;
+  }
+
+  private async assertAgentNameAvailable(cwd: string, agentName: string): Promise<void> {
+    const knownNames = await this.collectKnownAgentNames(cwd);
+    if (knownNames.has(agentName)) {
+      throw new Error(`Agent name is already in use: ${agentName}`);
+    }
+  }
+
+  private async collectKnownAgentNames(cwd: string, excludeSessionId?: string): Promise<Set<string>> {
+    const names = new Set<string>();
+    const sessions = await this.storage.listSessionRecords(cwd);
+    for (const session of sessions) {
+      if (excludeSessionId && session.sessionId === excludeSessionId) {
+        continue;
+      }
+      if (session.agentName) {
+        names.add(session.agentName);
+      }
+    }
+    return names;
+  }
+
+  private async resolveAgentSession(agentName: string, cwd?: string): Promise<SessionRecord> {
+    const normalizedName = normalizeAgentNameInput(agentName);
+    if (!normalizedName) {
+      throw new Error('agent_name is required');
+    }
+    const sessions = await this.storage.listSessionRecords(cwd);
+    const matches: SessionRecord[] = [];
+    for (const session of sessions) {
+      const namedSession = await this.ensureSessionAgentName(session);
+      if (namedSession.agentName === normalizedName) {
+        matches.push(namedSession);
+      }
+    }
+    if (matches.length === 0) {
+      throw new Error(
+        cwd
+          ? `Unknown agent_name in cwd ${cwd}: ${normalizedName}`
+          : `Unknown agent_name: ${normalizedName}`,
+      );
+    }
+    if (matches.length > 1) {
+      throw new Error(`agent_name is ambiguous across multiple cwd values: ${normalizedName}`);
+    }
+    return matches[0];
+  }
+
+  private async collectMergedRunRecords(filters: {
+    cwd?: string;
+    backend?: BackendKind;
+    status?: RunStatus;
+  } = {}): Promise<RunRecord[]> {
+    const liveRecords = [...this.runs.values()].map((managed) => managed.record);
+    const persistedRecords = await this.storage.listRunRecords(filters);
+    const merged = new Map<string, RunRecord>();
+    for (const record of persistedRecords) {
+      merged.set(record.runId, record);
+    }
+    for (const record of liveRecords) {
+      merged.set(record.runId, record);
+    }
+    return [...merged.values()];
+  }
+
   private findManagedRun(runId: string): ManagedRun | null {
     return this.runs.get(runId) ?? null;
   }
 
+  private scheduleManagedRun(managed: ManagedRun): void {
+    managed.task = this.runManaged(managed)
+      .catch(async (error) => {
+        await this.markRunFailed(managed, String(error));
+      })
+      .finally(async () => {
+        await this.onManagedRunSettled(managed);
+      });
+  }
+
+  private async startQueuedRun(managed: ManagedRun): Promise<void> {
+    if (isTerminalStatus(managed.record.status)) {
+      return;
+    }
+
+    const sessionKey = this.getSessionKey(managed.session);
+    this.claimSessionRun(sessionKey, managed.record.runId);
+    managed.starting = true;
+
+    try {
+      managed.handle = await managed.adapter.spawn(managed.spawnParams);
+      managed.starting = false;
+      if (managed.cancelRequested || isTerminalStatus(managed.record.status)) {
+        if (managed.handle) {
+          await managed.adapter.cancel(managed.handle);
+        }
+        this.releaseSessionRun(sessionKey, managed.record.runId);
+        await this.startNextQueuedRun(sessionKey);
+        return;
+      }
+      this.scheduleManagedRun(managed);
+    } catch (error) {
+      managed.starting = false;
+      this.releaseSessionRun(sessionKey, managed.record.runId);
+      await this.markRunFailed(managed, String(error));
+      await this.startNextQueuedRun(sessionKey);
+    }
+  }
+
   private async runManaged(managed: ManagedRun): Promise<void> {
+    const handle = managed.handle;
+    if (!handle) {
+      throw new Error(`run has no active handle: ${managed.record.runId}`);
+    }
+
     const [streamResult, runResult] = await Promise.allSettled([
       this.consumeEvents(managed),
-      managed.handle.run(),
+      handle.run(),
     ]);
 
     if (managed.record.status === 'cancelled') {
@@ -385,7 +675,7 @@ export class RunManager {
       await this.storage.writeResult(
         managed.record.cwd,
         managed.record.runId,
-        managed.handle.getResult(),
+        handle.getResult(),
       );
       return;
     }
@@ -407,17 +697,21 @@ export class RunManager {
     ) {
       const completedAt = new Date().toISOString();
       managed.record.status = 'completed';
-      managed.record.summary = managed.handle.getSummary() || 'Run completed';
+      managed.record.summary = handle.getSummary() || 'Run completed';
       managed.record.updatedAt = completedAt;
       managed.record.completedAt = completedAt;
-      managed.record.result = managed.handle.getResult();
+      managed.record.result = handle.getResult();
       await this.storage.writeRunRecord(managed.record);
       await this.storage.writeResult(managed.record.cwd, managed.record.runId, managed.record.result);
     }
   }
 
   private async consumeEvents(managed: ManagedRun): Promise<void> {
-    for await (const adapterEvent of managed.handle.eventStream) {
+    const handle = managed.handle;
+    if (!handle) {
+      throw new Error(`run has no active handle: ${managed.record.runId}`);
+    }
+    for await (const adapterEvent of handle.eventStream) {
       if (isRawEvent(adapterEvent)) {
         continue;
       }
@@ -440,6 +734,7 @@ export class RunManager {
   private applyEventToRecord(managed: ManagedRun, event: NormalizedEvent): void {
     const now = event.ts;
     const previousStatus = managed.record.status;
+    const fallbackSummary = managed.handle?.getSummary() ?? managed.record.summary;
     managed.record.lastSeq = event.seq;
     managed.record.updatedAt = now;
 
@@ -493,13 +788,13 @@ export class RunManager {
       managed.record.error = String(event.data.message ?? 'Run failed');
     }
 
-    const summary = deriveSummary(event, managed.handle.getSummary());
+    const summary = deriveSummary(event, fallbackSummary);
     if (summary) {
       managed.record.summary = summary;
     }
 
     if (managed.record.status === 'completed' || managed.record.status === 'failed') {
-      managed.record.result = managed.handle.getResult() ?? managed.record.result;
+      managed.record.result = managed.handle?.getResult() ?? managed.record.result;
     }
   }
 
@@ -527,7 +822,7 @@ export class RunManager {
       return;
     }
     const failedAt = new Date().toISOString();
-    managed.record.result = managed.handle.getResult();
+    managed.record.result = managed.handle?.getResult() ?? null;
 
     const event = this.prepareEvent(managed, {
       seq: 0,
@@ -542,6 +837,102 @@ export class RunManager {
     });
     await this.persistEvent(managed, event);
   }
+
+  private shouldQueueSessionRun(sessionMode: SessionMode, session: SessionRecord): boolean {
+    if (sessionMode !== 'resume') {
+      return false;
+    }
+    const sessionKey = this.getSessionKey(session);
+    return this.activeRunsBySession.has(sessionKey) || (this.queuedRunsBySession.get(sessionKey)?.length ?? 0) > 0;
+  }
+
+  private enqueueRunForSession(managed: ManagedRun): void {
+    const sessionKey = this.getSessionKey(managed.session);
+    const queue = this.queuedRunsBySession.get(sessionKey) ?? [];
+    queue.push(managed);
+    this.queuedRunsBySession.set(sessionKey, queue);
+  }
+
+  private claimSessionRun(sessionKey: string, runId: string): void {
+    const activeRunId = this.activeRunsBySession.get(sessionKey);
+    if (activeRunId && activeRunId !== runId) {
+      throw new Error(`session already has an active run: ${sessionKey}`);
+    }
+    this.activeRunsBySession.set(sessionKey, runId);
+  }
+
+  private releaseSessionRun(sessionKey: string, runId: string): void {
+    if (this.activeRunsBySession.get(sessionKey) === runId) {
+      this.activeRunsBySession.delete(sessionKey);
+    }
+  }
+
+  private async onManagedRunSettled(managed: ManagedRun): Promise<void> {
+    if (!isTerminalStatus(managed.record.status)) {
+      return;
+    }
+    const sessionKey = this.getSessionKey(managed.session);
+    this.releaseSessionRun(sessionKey, managed.record.runId);
+    await this.startNextQueuedRun(sessionKey);
+  }
+
+  private async startNextQueuedRun(sessionKey: string): Promise<void> {
+    if (this.activeRunsBySession.has(sessionKey)) {
+      return;
+    }
+    const queue = this.queuedRunsBySession.get(sessionKey);
+    if (!queue?.length) {
+      this.queuedRunsBySession.delete(sessionKey);
+      return;
+    }
+    const next = queue.shift();
+    if (!queue.length) {
+      this.queuedRunsBySession.delete(sessionKey);
+    } else {
+      this.queuedRunsBySession.set(sessionKey, queue);
+    }
+    if (!next) {
+      return;
+    }
+    await this.startQueuedRun(next);
+  }
+
+  private async cancelQueuedRun(managed: ManagedRun, reason?: string): Promise<void> {
+    managed.cancelRequested = true;
+    const sessionKey = this.getSessionKey(managed.session);
+    const queue = this.queuedRunsBySession.get(sessionKey);
+    if (queue) {
+      const nextQueue = queue.filter((candidate) => candidate.record.runId !== managed.record.runId);
+      if (nextQueue.length) {
+        this.queuedRunsBySession.set(sessionKey, nextQueue);
+      } else {
+        this.queuedRunsBySession.delete(sessionKey);
+      }
+    }
+
+    if (isTerminalStatus(managed.record.status)) {
+      return;
+    }
+
+    const cancelledAt = new Date().toISOString();
+    const event = this.prepareEvent(managed, {
+      seq: 0,
+      ts: cancelledAt,
+      run_id: '',
+      session_id: managed.record.sessionId,
+      backend: managed.record.backend,
+      type: 'status_changed',
+      data: {
+        status: 'cancelled',
+        ...(reason ? { reason } : {}),
+      },
+    });
+    await this.persistEvent(managed, event);
+  }
+
+  private getSessionKey(session: SessionRecord): string {
+    return `${session.cwd}::${session.sessionId}`;
+  }
 }
 
 function toGetRunResult(record: RunRecord): GetRunResult {
@@ -550,6 +941,7 @@ function toGetRunResult(record: RunRecord): GetRunResult {
     backend: record.backend,
     role: record.role,
     session_id: record.sessionId,
+    agent_name: getRunAgentName(record),
     status: record.status,
     started_at: record.startedAt,
     updated_at: record.updatedAt,
@@ -559,6 +951,46 @@ function toGetRunResult(record: RunRecord): GetRunResult {
     metadata: record.metadata ?? {},
     remote_ref: record.remoteRef ?? null,
   };
+}
+
+function getRunAgentName(record: RunRecord): string {
+  return record.agentName ?? `run-${record.runId.slice(0, 8)}`;
+}
+
+function getSessionAgentName(session: SessionRecord): string {
+  return session.agentName ?? `session-${session.sessionId.slice(0, 8)}`;
+}
+
+function normalizeAgentNameInput(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function selectAgentDirectoryRun(records: RunRecord[]): RunRecord | null {
+  if (records.length === 0) {
+    return null;
+  }
+
+  const active = records
+    .filter((record) => !isTerminalStatus(record.status))
+    .sort(compareRunRecordsByPriority);
+  if (active.length > 0) {
+    return active[0];
+  }
+
+  const sorted = [...records].sort(compareRunRecordsByPriority);
+  return sorted[0] ?? null;
+}
+
+function compareRunRecordsByPriority(left: RunRecord, right: RunRecord): number {
+  const updated = right.updatedAt.localeCompare(left.updatedAt);
+  if (updated !== 0) {
+    return updated;
+  }
+  return right.startedAt.localeCompare(left.startedAt);
 }
 
 function isRawEvent(value: NormalizedEvent | { kind: 'raw' }): value is { kind: 'raw' } {

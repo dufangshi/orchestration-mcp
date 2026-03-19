@@ -14,6 +14,8 @@ export type BackendKind = 'codex' | 'claude_code' | 'remote_a2a';
 
 export type SessionMode = 'new' | 'resume';
 
+export type AgentDirectoryStatus = RunStatus | 'idle';
+
 export type NormalizedEventType =
   | 'run_started'
   | 'status_changed'
@@ -92,6 +94,7 @@ export interface RunRecord {
   backend: BackendKind;
   role: RunRole;
   sessionId: string;
+  agentName?: string;
   status: RunStatus;
   cwd: string;
   prompt: string;
@@ -111,6 +114,7 @@ export interface SessionRecord {
   sessionId: string;
   backend: BackendKind;
   cwd: string;
+  agentName?: string;
   backendSessionId: string | null;
   remoteRef: RemoteRef | null;
   createdAt: string;
@@ -151,6 +155,7 @@ export interface ArtifactWriteInstruction {
 export interface SpawnRunInput {
   backend: BackendKind;
   role: RunRole;
+  nickname?: string;
   prompt?: string;
   input_message?: AgentMessage;
   cwd: string;
@@ -167,6 +172,7 @@ export interface SpawnRunResult {
   backend: BackendKind;
   role: RunRole;
   session_id: string;
+  agent_name: string;
   status: RunStatus;
 }
 
@@ -179,6 +185,7 @@ export interface GetRunResult {
   backend: BackendKind;
   role: RunRole;
   session_id: string;
+  agent_name: string;
   status: RunStatus;
   started_at: string;
   updated_at: string;
@@ -253,6 +260,68 @@ export interface ListRunsInput {
 
 export interface ListRunsResult {
   runs: GetRunResult[];
+}
+
+export interface SendAgentMessageInput {
+  to_agent_name: string;
+  from_agent_name?: string;
+  cwd?: string;
+  message: AgentMessage;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SendAgentMessageResult {
+  message_id: string;
+  to_agent_name: string;
+  to_session_id: string;
+  seq: number;
+  created_at: string;
+}
+
+export interface AgentInboxMessage {
+  message_id: string;
+  seq: number;
+  from_agent_name: string | null;
+  from_session_id: string | null;
+  to_agent_name: string;
+  to_session_id: string;
+  created_at: string;
+  body: AgentMessage;
+  metadata: Record<string, unknown>;
+}
+
+export interface FetchAgentMessagesInput {
+  agent_name: string;
+  cwd?: string;
+  after_seq?: number;
+  limit?: number;
+}
+
+export interface FetchAgentMessagesResult {
+  agent_name: string;
+  session_id: string;
+  messages: AgentInboxMessage[];
+  next_after_seq: number;
+}
+
+export interface AgentDirectoryEntry {
+  agent_name: string;
+  role: RunRole | null;
+  session_id: string;
+  status: AgentDirectoryStatus;
+  cwd: string;
+  last_run_id: string | null;
+  updated_at: string;
+}
+
+export interface ListAgentsInput {
+  cwd?: string;
+  backend?: BackendKind;
+  status?: AgentDirectoryStatus;
+}
+
+export interface ListAgentsResult {
+  agents: AgentDirectoryEntry[];
 }
 
 export interface AdapterSpawnParams {

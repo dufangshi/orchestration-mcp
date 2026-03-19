@@ -12,6 +12,17 @@ export const runStatusSchema = z.enum([
   'cancelled',
   'rejected',
 ]);
+export const agentDirectoryStatusSchema = z.enum([
+  'queued',
+  'running',
+  'input_required',
+  'auth_required',
+  'completed',
+  'failed',
+  'cancelled',
+  'rejected',
+  'idle',
+]);
 export const sessionModeSchema = z.enum(['new', 'resume']);
 
 const unknownObjectSchema = z.record(z.string(), z.unknown());
@@ -70,6 +81,11 @@ export const spawnRunSchema = z
       'Backend to execute the run. Supported values are "codex", "claude_code", and "remote_a2a".',
     ),
     role: runRoleSchema.describe('Supervisor role for this run: planner, worker, or reviewer.'),
+    nickname: z
+      .string()
+      .min(1)
+      .describe('Optional stable agent nickname, such as "worker1" or "reviewer1".')
+      .optional(),
     prompt: z.string().min(1).optional().describe('Primary instruction for the coding agent run.'),
     input_message: agentMessageSchema
       .optional()
@@ -155,6 +171,27 @@ export const listRunsSchema = z.object({
   cwd: z.string().min(1).optional(),
 });
 
+export const sendAgentMessageSchema = z.object({
+  to_agent_name: z.string().min(1),
+  from_agent_name: z.string().min(1).optional(),
+  cwd: z.string().min(1).optional(),
+  message: agentMessageSchema,
+  metadata: unknownObjectSchema.optional(),
+});
+
+export const fetchAgentMessagesSchema = z.object({
+  agent_name: z.string().min(1),
+  cwd: z.string().min(1).optional(),
+  after_seq: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(1000).default(100),
+});
+
+export const listAgentsSchema = z.object({
+  cwd: z.string().min(1).optional(),
+  backend: backendKindSchema.optional(),
+  status: agentDirectoryStatusSchema.optional(),
+});
+
 export const artifactRefSchema = z.object({
   field_path: z.string(),
   relpath: z.string(),
@@ -200,6 +237,7 @@ export const runSummarySchema = z.object({
   backend: backendKindSchema,
   role: runRoleSchema,
   session_id: z.string(),
+  agent_name: z.string(),
   status: runStatusSchema,
   started_at: z.string(),
   updated_at: z.string(),
@@ -210,11 +248,34 @@ export const runSummarySchema = z.object({
   remote_ref: remoteRefSchema.nullable(),
 });
 
+export const agentInboxMessageSchema = z.object({
+  message_id: z.string(),
+  seq: z.number().int().min(1),
+  from_agent_name: z.string().nullable(),
+  from_session_id: z.string().nullable(),
+  to_agent_name: z.string(),
+  to_session_id: z.string(),
+  created_at: z.string(),
+  body: agentMessageSchema,
+  metadata: unknownObjectSchema,
+});
+
+export const agentDirectoryEntrySchema = z.object({
+  agent_name: z.string(),
+  role: runRoleSchema.nullable(),
+  session_id: z.string(),
+  status: agentDirectoryStatusSchema,
+  cwd: z.string(),
+  last_run_id: z.string().nullable(),
+  updated_at: z.string(),
+});
+
 export const spawnRunResultSchema = z.object({
   run_id: z.string(),
   backend: backendKindSchema,
   role: runRoleSchema,
   session_id: z.string(),
+  agent_name: z.string(),
   status: runStatusSchema,
 });
 
@@ -238,6 +299,25 @@ export const cancelRunResultSchema = z.object({
 
 export const listRunsResultSchema = z.object({
   runs: z.array(runSummarySchema),
+});
+
+export const sendAgentMessageResultSchema = z.object({
+  message_id: z.string(),
+  to_agent_name: z.string(),
+  to_session_id: z.string(),
+  seq: z.number().int().min(1),
+  created_at: z.string(),
+});
+
+export const fetchAgentMessagesResultSchema = z.object({
+  agent_name: z.string(),
+  session_id: z.string(),
+  messages: z.array(agentInboxMessageSchema),
+  next_after_seq: z.number().int().min(0),
+});
+
+export const listAgentsResultSchema = z.object({
+  agents: z.array(agentDirectoryEntrySchema),
 });
 
 export const getEventArtifactResultSchema = z.object({
