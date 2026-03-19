@@ -343,6 +343,51 @@ test('RunManager sends and fetches session inbox messages by agent_name', async 
   await manager.shutdown(1000);
 });
 
+test('continueRun resumes a failed Codex session with a new run', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-continue-failed-'));
+  const manager = new RunManager([new RecoverableFailureAdapter()]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker1',
+    prompt: 'first attempt',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'failed');
+    assert.match(run.summary, /stream disconnected \/ network error/);
+  });
+
+  const resumed = await manager.continueRun({
+    run_id: first.run_id,
+    input_message: {
+      role: 'user',
+      parts: [{ type: 'text', text: 'Please continue from where you left off.' }],
+    },
+  });
+
+  assert.equal(resumed.mode, 'resume');
+  assert.equal(resumed.resumed_from_run_id, first.run_id);
+  assert.equal(resumed.session_id, first.session_id);
+  assert.equal(resumed.agent_name, 'worker1');
+  assert.notEqual(resumed.run_id, first.run_id);
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: resumed.run_id });
+    assert.equal(run.status, 'completed');
+    assert.equal(run.agent_name, 'worker1');
+  });
+
+  const completed = await manager.getRun({ run_id: resumed.run_id });
+  assert.equal(completed.session_id, first.session_id);
+
+  await manager.shutdown(1000);
+});
+
 test('listAgents returns stable agent directory entries', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-directory-'));
   const adapter = new SessionQueueAdapter();
@@ -743,6 +788,25 @@ class SessionQueueAdapter {
   }
 }
 
+class RecoverableFailureAdapter {
+  backend = 'codex';
+
+  async spawn(params) {
+    if (params.sessionMode === 'resume') {
+      return new RecoverableResumeHandle(
+        params.session.sessionId,
+        params.session.backendSessionId ?? 'thread-recovered',
+        params.inputMessage,
+      );
+    }
+    return new RecoverableFailureHandle(params.session.sessionId, 'thread-recoverable');
+  }
+
+  async cancel(handle) {
+    handle.abort();
+  }
+}
+
 class HangingHandle {
   constructor(sessionId) {
     this.sessionId = sessionId;
@@ -831,6 +895,88 @@ class SessionQueueHandle {
   abort() {
     this.aborted = true;
   }
+}
+
+class RecoverableFailureHandle {
+  constructor(sessionId, threadId) {
+    this.sessionId = sessionId;
+    this.threadId = threadId;
+    this.result = null;
+    this.eventStream = (async function* () {
+      yield {
+        seq: 0,
+        ts: new Date().toISOString(),
+        run_id: '',
+        session_id: sessionId,
+        backend: 'codex',
+        type: 'run_started',
+        data: {
+          thread_id: threadId,
+        },
+      };
+    })();
+  }
+
+  async run() {
+    throw new Error('stream disconnected / network error');
+  }
+
+  getSummary() {
+    return 'Run failed: stream disconnected / network error';
+  }
+
+  getResult() {
+    return this.result;
+  }
+
+  abort() {}
+}
+
+class RecoverableResumeHandle {
+  constructor(sessionId, threadId, inputMessage) {
+    this.sessionId = sessionId;
+    this.threadId = threadId;
+    this.finalResponse = inputMessage.parts.find((part) => part.type === 'text')?.text ?? 'continued';
+    this.result = {
+      finalResponse: this.finalResponse,
+    };
+    this.eventStream = (async function* () {
+      yield {
+        seq: 0,
+        ts: new Date().toISOString(),
+        run_id: '',
+        session_id: sessionId,
+        backend: 'codex',
+        type: 'run_started',
+        data: {
+          thread_id: threadId,
+        },
+      };
+      yield {
+        seq: 0,
+        ts: new Date().toISOString(),
+        run_id: '',
+        session_id: sessionId,
+        backend: 'codex',
+        type: 'run_completed',
+        data: {
+          final_response: this.finalResponse,
+        },
+      };
+    }).call(this);
+  }
+
+  async run() {}
+
+  getSummary() {
+    return 'Run completed after resume';
+  }
+
+  getResult() {
+    return this.result;
+  }
+
+  abort() {}
 }
 
 class LateTerminalHandle {

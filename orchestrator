@@ -1,14 +1,14 @@
 #!/bin/sh
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-TARGET="$SCRIPT_DIR/dist/cli/peer.js"
+TARGET="$SCRIPT_DIR/dist/cli/orchestrator.js"
 
 if [ -z "${NANOBOT_ORCHESTRATOR_HOME:-}" ]; then
   export NANOBOT_ORCHESTRATOR_HOME="$SCRIPT_DIR/.nanobot-orchestrator/home"
 fi
 
 if [ ! -f "$TARGET" ]; then
-  echo "peer CLI is not built. Run npm run build." >&2
+  echo "orchestrator CLI is not built. Run npm run build." >&2
   exit 1
 fi
 

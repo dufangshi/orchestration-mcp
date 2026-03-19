@@ -209,6 +209,15 @@ export class RunManager {
 
   async continueRun(input: ContinueRunInput): Promise<ContinueRunResult> {
     const managed = this.findManagedRun(input.run_id);
+    const storedRecord = managed?.record ?? (await this.storage.readRunRecordById(input.run_id));
+    if (!storedRecord) {
+      throw new Error(`Unknown run_id: ${input.run_id}`);
+    }
+
+    if (storedRecord.status === 'failed') {
+      return this.resumeFailedRun(storedRecord, input.input_message);
+    }
+
     if (!managed) {
       throw new Error(`run is not active in this process: ${input.run_id}`);
     }
@@ -250,6 +259,10 @@ export class RunManager {
     return {
       run_id: managed.record.runId,
       status: managed.record.status,
+      session_id: managed.record.sessionId,
+      agent_name: getRunAgentName(managed.record),
+      mode: 'live',
+      resumed_from_run_id: null,
     };
   }
 
@@ -836,6 +849,54 @@ export class RunManager {
       },
     });
     await this.persistEvent(managed, event);
+  }
+
+  private async resumeFailedRun(record: RunRecord, inputMessage: AgentMessage): Promise<ContinueRunResult> {
+    const session = await this.sessions.getExisting(record.cwd, record.sessionId);
+    if (!session) {
+      throw new Error(`Unknown session_id: ${record.sessionId}`);
+    }
+
+    const resumable =
+      Boolean(session.backendSessionId) ||
+      Boolean(session.remoteRef?.context_id) ||
+      Boolean(session.remoteRef?.conversation_id);
+    if (!resumable) {
+      throw new Error(`run failed before the backend session became resumable: ${record.runId}`);
+    }
+
+    const resumed = await this.spawnRun({
+      backend: record.backend,
+      role: record.role,
+      cwd: record.cwd,
+      session_mode: 'resume',
+      session_id: record.sessionId,
+      input_message: inputMessage,
+      profile: record.profile,
+      metadata: {
+        resumed_from_run_id: record.runId,
+        resume_reason: 'continue_run_after_failed',
+      },
+      backend_config: this.buildResumeBackendConfig(record, session),
+    });
+
+    return {
+      run_id: resumed.run_id,
+      status: resumed.status,
+      session_id: resumed.session_id,
+      agent_name: resumed.agent_name,
+      mode: 'resume',
+      resumed_from_run_id: record.runId,
+    };
+  }
+
+  private buildResumeBackendConfig(record: RunRecord, session: SessionRecord): Record<string, unknown> {
+    if (record.backend !== 'remote_a2a') {
+      return {};
+    }
+
+    const agentUrl = session.remoteRef?.agent_url ?? record.remoteRef?.agent_url;
+    return agentUrl ? { agent_url: agentUrl } : {};
   }
 
   private shouldQueueSessionRun(sessionMode: SessionMode, session: SessionRecord): boolean {

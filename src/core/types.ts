@@ -228,6 +228,10 @@ export interface ContinueRunInput {
 export interface ContinueRunResult {
   run_id: string;
   status: RunStatus;
+  session_id?: string;
+  agent_name?: string;
+  mode?: 'live' | 'resume';
+  resumed_from_run_id?: string | null;
 }
 
 export interface GetEventArtifactInput {

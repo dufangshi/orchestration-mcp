@@ -282,6 +282,10 @@ export const spawnRunResultSchema = z.object({
 export const continueRunResultSchema = z.object({
   run_id: z.string(),
   status: runStatusSchema,
+  session_id: z.string().optional(),
+  agent_name: z.string().optional(),
+  mode: z.enum(['live', 'resume']).optional(),
+  resumed_from_run_id: z.string().nullable().optional(),
 });
 
 export const pollEventsResultSchema = z.object({

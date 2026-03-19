@@ -1,8 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import { ClaudeCodeAdapter } from './adapters/claude.js';
-import { CodexAdapter } from './adapters/codex.js';
-import { RemoteA2AAdapter } from './backends/remote-a2a.js';
+import { createDefaultManager } from './app/orchestrator-app.js';
 import { RunManager } from './core/run-manager.js';
 import { registerCancelRunTool } from './tools/cancel-run.js';
 import { registerContinueRunTool } from './tools/continue-run.js';
@@ -15,9 +13,7 @@ import { registerPollEventsTool } from './tools/poll-events.js';
 import { registerSendAgentMessageTool } from './tools/send-agent-message.js';
 import { registerSpawnRunTool } from './tools/spawn-run.js';
 
-export function createDefaultManager(): RunManager {
-  return new RunManager([new CodexAdapter(), new ClaudeCodeAdapter(), new RemoteA2AAdapter()]);
-}
+export { createDefaultManager } from './app/orchestrator-app.js';
 
 export function createServer(options?: { manager?: RunManager }): McpServer {
   const server = new McpServer({

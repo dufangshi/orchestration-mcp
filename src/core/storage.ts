@@ -1,8 +1,8 @@
 import { mkdir, appendFile, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
 import path from 'node:path';
 
+import { getOrchestratorHomeDir, ORCHESTRATOR_ROOT_DIR } from './paths.js';
 import type {
   AgentInboxMessage,
   ArtifactRef,
@@ -14,7 +14,6 @@ import type {
   SessionRecord,
 } from './types.js';
 
-const ROOT_DIR = '.nanobot-orchestrator';
 const ARTIFACT_CHUNK_BYTES = 64 * 1024;
 const REGISTRY_LOCK_RETRY_MS = 25;
 const REGISTRY_LOCK_TIMEOUT_MS = 5000;
@@ -54,7 +53,7 @@ interface RunRegistry {
 
 export class Storage {
   getRootDir(cwd: string): string {
-    return path.join(cwd, ROOT_DIR);
+    return path.join(cwd, ORCHESTRATOR_ROOT_DIR);
   }
 
   getRunsDir(cwd: string): string {
@@ -82,7 +81,7 @@ export class Storage {
   }
 
   getRegistryPath(): string {
-    return path.join(homedir(), ROOT_DIR, 'registry.json');
+    return path.join(getOrchestratorHomeDir(), 'registry.json');
   }
 
   async validateCwd(cwd: string): Promise<void> {
@@ -296,6 +295,26 @@ export class Storage {
     const runDir = this.getRunDir(cwd, runId);
     await mkdir(runDir, { recursive: true });
     await writeJson(path.join(runDir, 'result.json'), result);
+  }
+
+  async readResult(cwd: string, runId: string): Promise<RunResult | null> {
+    try {
+      const raw = await readFile(path.join(this.getRunDir(cwd, runId), 'result.json'), 'utf8');
+      return JSON.parse(raw) as RunResult | null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async readResultById(runId: string): Promise<RunResult | null> {
+    const cwd = await this.resolveRunCwd(runId);
+    if (!cwd) {
+      return null;
+    }
+    return this.readResult(cwd, runId);
   }
 
   async writeSessionRecord(record: SessionRecord): Promise<void> {

@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "orchestrator": "./orchestrator",
     "peer": "./peer"
   },
   "scripts": {
