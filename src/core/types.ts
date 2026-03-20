@@ -177,9 +177,9 @@ export interface SpawnRunResult {
 }
 
 export interface RunReferenceInput {
-  run_id?: string;
-  agent_name?: string;
-  cwd?: string;
+  run_id?: string | null;
+  agent_name?: string | null;
+  cwd?: string | null;
 }
 
 export interface GetRunInput extends RunReferenceInput {

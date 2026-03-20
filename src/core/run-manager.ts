@@ -579,12 +579,13 @@ export class RunManager {
     return names;
   }
 
-  private async resolveAgentSession(agentName: string, cwd?: string): Promise<SessionRecord> {
+  private async resolveAgentSession(agentName: string, cwd?: string | null): Promise<SessionRecord> {
     const normalizedName = normalizeAgentNameInput(agentName);
+    const resolvedCwd = typeof cwd === 'string' ? cwd : undefined;
     if (!normalizedName) {
       throw new Error('agent_name is required');
     }
-    const sessions = await this.storage.listSessionRecords(cwd);
+    const sessions = await this.storage.listSessionRecords(resolvedCwd);
     const matches: SessionRecord[] = [];
     for (const session of sessions) {
       const namedSession = await this.ensureSessionAgentName(session);
@@ -594,8 +595,8 @@ export class RunManager {
     }
     if (matches.length === 0) {
       throw new Error(
-        cwd
-          ? `Unknown agent_name in cwd ${cwd}: ${normalizedName}`
+        resolvedCwd
+          ? `Unknown agent_name in cwd ${resolvedCwd}: ${normalizedName}`
           : `Unknown agent_name: ${normalizedName}`,
       );
     }
@@ -625,8 +626,8 @@ export class RunManager {
   private async resolveRunTarget(input: RunReferenceInput): Promise<ResolvedRunTarget> {
     const runId = typeof input.run_id === 'string' ? input.run_id.trim() : '';
     const agentName = normalizeAgentNameInput(input.agent_name);
-    if ((runId ? 1 : 0) + (agentName ? 1 : 0) !== 1) {
-      throw new Error('Provide exactly one of run_id or agent_name');
+    if (!runId && !agentName) {
+      throw new Error('Provide run_id or agent_name');
     }
 
     if (runId) {
@@ -1065,7 +1066,7 @@ function getSessionAgentName(session: SessionRecord): string {
   return session.agentName ?? `session-${session.sessionId.slice(0, 8)}`;
 }
 
-function normalizeAgentNameInput(value: string | undefined): string | undefined {
+function normalizeAgentNameInput(value: string | null | undefined): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
   }

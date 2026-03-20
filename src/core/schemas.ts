@@ -138,22 +138,22 @@ export const spawnRunSchema = z
   });
 
 const runReferenceFieldsSchema = z.object({
-  run_id: z.string().min(1).optional(),
-  agent_name: z.string().min(1).optional(),
-  cwd: z.string().min(1).optional(),
+  run_id: z.string().min(1).nullable().optional(),
+  agent_name: z.string().min(1).nullable().optional(),
+  cwd: z.string().min(1).nullable().optional(),
 });
 
 function validateRunReference(
-  value: { run_id?: string; agent_name?: string },
+  value: { run_id?: string | null; agent_name?: string | null },
   ctx: z.RefinementCtx,
 ): void {
   const hasRunId = typeof value.run_id === 'string' && value.run_id.length > 0;
   const hasAgentName = typeof value.agent_name === 'string' && value.agent_name.length > 0;
-  if (hasRunId === hasAgentName) {
+  if (!hasRunId && !hasAgentName) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['run_id'],
-      message: 'Provide exactly one of run_id or agent_name',
+      message: 'Provide run_id or agent_name',
     });
   }
 }

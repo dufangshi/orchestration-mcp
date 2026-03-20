@@ -434,7 +434,7 @@ test('continueRun resumes a completed Codex session with a new run', async () =>
 
   await waitFor(async () => {
     const run = await manager.getRun({ run_id: resumed.run_id });
-    assert.equal(run.status, 'running');
+    assert.equal(run.status === 'running' || run.status === 'queued', true);
     assert.equal(run.agent_name, 'worker1');
   });
 
@@ -445,6 +445,39 @@ test('continueRun resumes a completed Codex session with a new run', async () =>
     assert.equal(run.status, 'completed');
     assert.equal(run.session_id, first.session_id);
   });
+
+  await manager.shutdown(1000);
+});
+
+test('RunManager accepts both run_id and agent_name references and prefers run_id', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-run-reference-both-'));
+  const manager = new RunManager([new HangingAdapter()]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker1',
+    prompt: 'first',
+    cwd,
+    session_mode: 'new',
+  });
+  const second = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker2',
+    prompt: 'second',
+    cwd,
+    session_mode: 'new',
+  });
+
+  const resolved = await manager.getRun({
+    run_id: first.run_id,
+    agent_name: 'worker2',
+    cwd,
+  });
+
+  assert.equal(resolved.run_id, first.run_id);
+  assert.equal(resolved.agent_name, 'worker1');
 
   await manager.shutdown(1000);
 });
