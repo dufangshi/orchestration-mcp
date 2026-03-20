@@ -109,7 +109,7 @@ test('orchestrator daemon and detached run lifecycle commands use the detached c
 
   const continueIo = createIo({}, cwd);
   const continueExitCode = await runOrchestratorCli(
-    ['runs', 'continue', 'detached-run-1', 'Please continue.', '--output', 'json'],
+    ['runs', 'continue', 'worker1', 'Please continue.', '--cwd', cwd, '--output', 'json'],
     continueIo,
     {
       createApp: () => createReadOnlyApp(),
@@ -118,7 +118,8 @@ test('orchestrator daemon and detached run lifecycle commands use the detached c
   );
   assert.equal(continueExitCode, 0);
   assert.equal(detachedClient.continueInputs.length, 1);
-  assert.equal(detachedClient.continueInputs[0].run_id, 'detached-run-1');
+  assert.equal(detachedClient.continueInputs[0].agent_name, 'worker1');
+  assert.equal(detachedClient.continueInputs[0].cwd, cwd);
   assert.equal(
     detachedClient.continueInputs[0].input_message.parts.find((part) => part.type === 'text')?.text,
     'Please continue.',
@@ -126,13 +127,14 @@ test('orchestrator daemon and detached run lifecycle commands use the detached c
   assert.equal(readJson(continueIo.stdoutText()).mode, 'resume');
 
   const cancelIo = createIo({}, cwd);
-  const cancelExitCode = await runOrchestratorCli(['runs', 'cancel', 'detached-run-1', '--output', 'json'], cancelIo, {
+  const cancelExitCode = await runOrchestratorCli(['runs', 'cancel', 'worker1', '--cwd', cwd, '--output', 'json'], cancelIo, {
     createApp: () => createReadOnlyApp(),
     createDetachedClient: () => detachedClient,
   });
   assert.equal(cancelExitCode, 0);
   assert.equal(detachedClient.cancelInputs.length, 1);
-  assert.equal(detachedClient.cancelInputs[0].run_id, 'detached-run-1');
+  assert.equal(detachedClient.cancelInputs[0].agent_name, 'worker1');
+  assert.equal(detachedClient.cancelInputs[0].cwd, cwd);
   assert.equal(readJson(cancelIo.stdoutText()).status, 'cancelled');
 });
 
@@ -173,7 +175,7 @@ test('orchestrator runs list and runs show expose persisted runs', async () => {
   assert.equal(listPayload.runs[0].run_id, spawned.run_id);
 
   const showIo = createIo({}, cwd);
-  const showExitCode = await runOrchestratorCli(['runs', 'show', spawned.run_id, '--output', 'json'], showIo, {
+  const showExitCode = await runOrchestratorCli(['runs', 'show', spawned.agent_name, '--cwd', cwd, '--output', 'json'], showIo, {
     createApp: () => createReadOnlyApp(),
   });
   assert.equal(showExitCode, 0);
@@ -217,7 +219,7 @@ test('orchestrator events tail streams persisted events as jsonl', async () => {
 
   const io = createIo({}, cwd);
   const exitCode = await runOrchestratorCli(
-    ['events', 'tail', spawned.run_id, '--output', 'jsonl', '--timeout', '0'],
+    ['events', 'tail', spawned.agent_name, '--cwd', cwd, '--output', 'jsonl', '--timeout', '0'],
     io,
     { createApp: () => createReadOnlyApp() },
   );
@@ -282,7 +284,7 @@ test('orchestrator artifacts get reads persisted event artifacts', async () => {
 
   const io = createIo({}, cwd);
   const exitCode = await runOrchestratorCli(
-    ['artifacts', 'get', spawned.run_id, String(toolEventSeq), '/stdout', '--output', 'json'],
+    ['artifacts', 'get', spawned.agent_name, '--cwd', cwd, String(toolEventSeq), '/stdout', '--output', 'json'],
     io,
     { createApp: () => createReadOnlyApp() },
   );
@@ -549,14 +551,14 @@ class FakeDetachedClient {
       session_id: 'session-detached-1',
       agent_name: 'worker1',
       mode: 'resume',
-      resumed_from_run_id: input.run_id,
+      resumed_from_run_id: input.run_id ?? null,
     };
   }
 
   async cancelRun(input) {
     this.cancelInputs.push(input);
     return {
-      run_id: input.run_id,
+      run_id: input.run_id ?? 'detached-run-1',
       status: 'cancelled',
       cancelled_at: new Date().toISOString(),
     };

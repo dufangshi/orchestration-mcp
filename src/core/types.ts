@@ -176,8 +176,13 @@ export interface SpawnRunResult {
   status: RunStatus;
 }
 
-export interface GetRunInput {
-  run_id: string;
+export interface RunReferenceInput {
+  run_id?: string;
+  agent_name?: string;
+  cwd?: string;
+}
+
+export interface GetRunInput extends RunReferenceInput {
 }
 
 export interface GetRunResult {
@@ -196,8 +201,7 @@ export interface GetRunResult {
   remote_ref: RemoteRef | null;
 }
 
-export interface PollEventsInput {
-  run_id: string;
+export interface PollEventsInput extends RunReferenceInput {
   after_seq: number;
   limit?: number;
   wait_ms?: number;
@@ -210,8 +214,7 @@ export interface PollEventsResult {
   next_after_seq: number;
 }
 
-export interface CancelRunInput {
-  run_id: string;
+export interface CancelRunInput extends RunReferenceInput {
 }
 
 export interface CancelRunResult {
@@ -220,8 +223,7 @@ export interface CancelRunResult {
   cancelled_at: string;
 }
 
-export interface ContinueRunInput {
-  run_id: string;
+export interface ContinueRunInput extends RunReferenceInput {
   input_message: AgentMessage;
 }
 
@@ -234,8 +236,7 @@ export interface ContinueRunResult {
   resumed_from_run_id?: string | null;
 }
 
-export interface GetEventArtifactInput {
-  run_id: string;
+export interface GetEventArtifactInput extends RunReferenceInput {
   seq: number;
   field_path: string;
   offset?: number;

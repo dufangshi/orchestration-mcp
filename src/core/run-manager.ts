@@ -36,6 +36,7 @@ import type {
   RunAdapter,
   RunRecord,
   RunStatus,
+  RunReferenceInput,
   SessionRecord,
   SendAgentMessageInput,
   SendAgentMessageResult,
@@ -54,6 +55,11 @@ interface ManagedRun {
   task: Promise<void>;
   starting: boolean;
   cancelRequested: boolean;
+}
+
+interface ResolvedRunTarget {
+  record: RunRecord;
+  managed: ManagedRun | null;
 }
 
 export class RunManager {
@@ -195,24 +201,14 @@ export class RunManager {
   }
 
   async getRun(input: GetRunInput): Promise<GetRunResult> {
-    const managed = this.findManagedRun(input.run_id);
-    if (managed) {
-      return toGetRunResult(managed.record);
-    }
-
-    const record = await this.storage.readRunRecordById(input.run_id);
-    if (!record) {
-      throw new Error(`Unknown run_id: ${input.run_id}`);
-    }
-    return toGetRunResult(record);
+    const target = await this.resolveRunTarget(input);
+    return toGetRunResult(target.record);
   }
 
   async continueRun(input: ContinueRunInput): Promise<ContinueRunResult> {
-    const managed = this.findManagedRun(input.run_id);
-    const storedRecord = managed?.record ?? (await this.storage.readRunRecordById(input.run_id));
-    if (!storedRecord) {
-      throw new Error(`Unknown run_id: ${input.run_id}`);
-    }
+    const target = await this.resolveRunTarget(input);
+    const managed = target.managed;
+    const storedRecord = target.record;
 
     if (storedRecord.status === 'failed') {
       return this.resumeFailedRun(storedRecord, input.input_message);
@@ -267,7 +263,8 @@ export class RunManager {
   }
 
   async pollEvents(input: PollEventsInput): Promise<PollEventsResult> {
-    const managed = this.findManagedRun(input.run_id);
+    const target = await this.resolveRunTarget(input);
+    const managed = target.managed;
     if (managed) {
       const events = await managed.buffer.waitForAfter(
         input.after_seq,
@@ -282,10 +279,7 @@ export class RunManager {
       };
     }
 
-    const record = await this.storage.readRunRecordById(input.run_id);
-    if (!record) {
-      throw new Error(`Unknown run_id: ${input.run_id}`);
-    }
+    const record = target.record;
     const events = await this.storage.readEvents(record.cwd, record.runId, input.after_seq, input.limit ?? 100);
     return {
       run_id: record.runId,
@@ -296,13 +290,10 @@ export class RunManager {
   }
 
   async cancelRun(input: CancelRunInput): Promise<CancelRunResult> {
-    const managed = this.findManagedRun(input.run_id);
+    const target = await this.resolveRunTarget(input);
+    const managed = target.managed;
     if (!managed) {
-      const existing = await this.storage.readRunRecordById(input.run_id);
-      if (!existing) {
-        throw new Error(`Unknown run_id: ${input.run_id}`);
-      }
-      throw new Error(`run is not active in this process: ${existing.status}`);
+      throw new Error(`run is not active in this process: ${target.record.status}`);
     }
 
     if (isTerminalStatus(managed.record.status)) {
@@ -342,7 +333,8 @@ export class RunManager {
   }
 
   async getEventArtifact(input: GetEventArtifactInput): Promise<GetEventArtifactResult> {
-    const managed = this.findManagedRun(input.run_id);
+    const target = await this.resolveRunTarget(input);
+    const managed = target.managed;
     if (managed) {
       return this.storage.readEventArtifact(
         managed.record.cwd,
@@ -354,8 +346,9 @@ export class RunManager {
       );
     }
 
-    return this.storage.readEventArtifactById(
-      input.run_id,
+    return this.storage.readEventArtifact(
+      target.record.cwd,
+      target.record.runId,
       input.seq,
       input.field_path,
       input.offset ?? 0,
@@ -627,6 +620,52 @@ export class RunManager {
       merged.set(record.runId, record);
     }
     return [...merged.values()];
+  }
+
+  private async resolveRunTarget(input: RunReferenceInput): Promise<ResolvedRunTarget> {
+    const runId = typeof input.run_id === 'string' ? input.run_id.trim() : '';
+    const agentName = normalizeAgentNameInput(input.agent_name);
+    if ((runId ? 1 : 0) + (agentName ? 1 : 0) !== 1) {
+      throw new Error('Provide exactly one of run_id or agent_name');
+    }
+
+    if (runId) {
+      const managed = this.findManagedRun(runId);
+      if (managed) {
+        return {
+          record: managed.record,
+          managed,
+        };
+      }
+
+      const record = await this.storage.readRunRecordById(runId);
+      if (!record) {
+        throw new Error(`Unknown run_id: ${runId}`);
+      }
+      return {
+        record,
+        managed: null,
+      };
+    }
+
+    const session = await this.resolveAgentSession(agentName!, input.cwd);
+    const records = (await this.collectMergedRunRecords({
+      cwd: session.cwd,
+      backend: session.backend,
+    })).filter((record) => record.sessionId === session.sessionId);
+    const selected = selectRunReferenceRecord(records);
+    if (!selected) {
+      throw new Error(
+        input.cwd
+          ? `No runs found for agent_name in cwd ${input.cwd}: ${agentName}`
+          : `No runs found for agent_name: ${agentName}`,
+      );
+    }
+
+    return {
+      record: selected,
+      managed: this.findManagedRun(selected.runId),
+    };
   }
 
   private findManagedRun(runId: string): ManagedRun | null {
@@ -1040,6 +1079,29 @@ function selectAgentDirectoryRun(records: RunRecord[]): RunRecord | null {
     .sort(compareRunRecordsByPriority);
   if (active.length > 0) {
     return active[0];
+  }
+
+  const sorted = [...records].sort(compareRunRecordsByPriority);
+  return sorted[0] ?? null;
+}
+
+function selectRunReferenceRecord(records: RunRecord[]): RunRecord | null {
+  if (records.length === 0) {
+    return null;
+  }
+
+  const executing = records
+    .filter((record) => record.status === 'running' || record.status === 'input_required' || record.status === 'auth_required')
+    .sort(compareRunRecordsByPriority);
+  if (executing.length > 0) {
+    return executing[0];
+  }
+
+  const queued = records
+    .filter((record) => record.status === 'queued')
+    .sort(compareRunRecordsByPriority);
+  if (queued.length > 0) {
+    return queued[0];
   }
 
   const sorted = [...records].sort(compareRunRecordsByPriority);

@@ -65,14 +65,17 @@ test('RunManager can drive remote A2A tasks through input_required and continue_
       assert.equal(run.status, 'completed');
     });
 
-    const finalPoll = await manager.pollEvents({
-      run_id: spawned.run_id,
-      after_seq: 0,
-      limit: 50,
-      wait_ms: 0,
+    let finalPoll;
+    await waitFor(async () => {
+      finalPoll = await manager.pollEvents({
+        run_id: spawned.run_id,
+        after_seq: 0,
+        limit: 50,
+        wait_ms: 0,
+      });
+      assert.equal(finalPoll.events.some((event) => event.type === 'artifact_added'), true);
+      assert.equal(finalPoll.events.some((event) => event.type === 'run_completed'), true);
     });
-    assert.equal(finalPoll.events.some((event) => event.type === 'artifact_added'), true);
-    assert.equal(finalPoll.events.some((event) => event.type === 'run_completed'), true);
 
     const artifactEvent = finalPoll.events.find((event) => event.type === 'artifact_added');
     assert.equal(artifactEvent.data.text, 'Processed: Use the approved implementation.');

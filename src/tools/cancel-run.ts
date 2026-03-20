@@ -12,7 +12,7 @@ export function registerCancelRunTool(server: McpServer, manager: RunManager): v
   server.registerTool(
     'cancel_run',
     {
-      description: 'Cancel a running external coding-agent run.',
+      description: 'Cancel a running external coding-agent run by run_id or agent_name.',
       inputSchema: cancelRunSchema,
       outputSchema: cancelRunResultSchema,
     },

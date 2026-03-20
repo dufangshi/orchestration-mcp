@@ -12,7 +12,7 @@ export function registerGetEventArtifactTool(server: McpServer, manager: RunMana
   server.registerTool(
     'get_event_artifact',
     {
-      description: 'Read a sanitized event artifact by run_id, seq, and JSON Pointer field_path.',
+      description: 'Read a sanitized event artifact by run_id or agent_name, seq, and JSON Pointer field_path.',
       inputSchema: getEventArtifactSchema,
       outputSchema: getEventArtifactResultSchema,
     },

@@ -9,6 +9,7 @@ import type {
   GetRunResult,
   ListRunsInput,
   ListRunsResult,
+  PollEventsInput,
   SpawnRunInput,
   SpawnRunResult,
 } from '../core/types.js';
@@ -56,7 +57,7 @@ export class DetachedOrchestratorClient implements OrchestratorService {
     return client.listRuns(input);
   }
 
-  async pollEvents(input: { run_id: string; after_seq: number; limit?: number; wait_ms?: number }) {
+  async pollEvents(input: PollEventsInput) {
     const client = await this.requireClient();
     return client.pollEvents(input);
   }

@@ -7,7 +7,7 @@ export function registerGetRunTool(server: McpServer, manager: RunManager): void
   server.registerTool(
     'get_run',
     {
-      description: 'Get the current summary status for a known run.',
+      description: 'Get the current summary status for a run by run_id or agent_name.',
       inputSchema: getRunSchema,
       outputSchema: runSummarySchema,
     },

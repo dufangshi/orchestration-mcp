@@ -137,33 +137,53 @@ export const spawnRunSchema = z
     }
   });
 
-export const continueRunSchema = z.object({
-  run_id: z.string().min(1),
-  input_message: agentMessageSchema,
+const runReferenceFieldsSchema = z.object({
+  run_id: z.string().min(1).optional(),
+  agent_name: z.string().min(1).optional(),
+  cwd: z.string().min(1).optional(),
 });
 
-export const getRunSchema = z.object({
-  run_id: z.string().min(1),
-});
+function validateRunReference(
+  value: { run_id?: string; agent_name?: string },
+  ctx: z.RefinementCtx,
+): void {
+  const hasRunId = typeof value.run_id === 'string' && value.run_id.length > 0;
+  const hasAgentName = typeof value.agent_name === 'string' && value.agent_name.length > 0;
+  if (hasRunId === hasAgentName) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['run_id'],
+      message: 'Provide exactly one of run_id or agent_name',
+    });
+  }
+}
 
-export const pollEventsSchema = z.object({
-  run_id: z.string().min(1),
-  after_seq: z.number().int().min(0),
-  limit: z.number().int().min(1).max(1000).default(100),
-  wait_ms: z.number().int().min(0).max(30000).default(20000),
-});
+export const continueRunSchema = runReferenceFieldsSchema
+  .extend({
+    input_message: agentMessageSchema,
+  })
+  .superRefine(validateRunReference);
 
-export const cancelRunSchema = z.object({
-  run_id: z.string().min(1),
-});
+export const getRunSchema = runReferenceFieldsSchema.superRefine(validateRunReference);
 
-export const getEventArtifactSchema = z.object({
-  run_id: z.string().min(1),
-  seq: z.number().int().min(1),
-  field_path: z.string().min(1),
-  offset: z.number().int().min(0).default(0),
-  limit: z.number().int().min(1).max(262144).default(65536),
-});
+export const pollEventsSchema = runReferenceFieldsSchema
+  .extend({
+    after_seq: z.number().int().min(0),
+    limit: z.number().int().min(1).max(1000).default(100),
+    wait_ms: z.number().int().min(0).max(30000).default(20000),
+  })
+  .superRefine(validateRunReference);
+
+export const cancelRunSchema = runReferenceFieldsSchema.superRefine(validateRunReference);
+
+export const getEventArtifactSchema = runReferenceFieldsSchema
+  .extend({
+    seq: z.number().int().min(1),
+    field_path: z.string().min(1),
+    offset: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(262144).default(65536),
+  })
+  .superRefine(validateRunReference);
 
 export const listRunsSchema = z.object({
   status: runStatusSchema.optional(),

@@ -12,7 +12,7 @@ export function registerPollEventsTool(server: McpServer, manager: RunManager): 
   server.registerTool(
     'poll_events',
     {
-      description: 'Long-poll incremental events for a run after a known sequence number.',
+      description: 'Long-poll incremental events for a run by run_id or agent_name after a known sequence number.',
       inputSchema: pollEventsSchema,
       outputSchema: pollEventsResultSchema,
     },

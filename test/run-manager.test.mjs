@@ -92,9 +92,11 @@ test('markRunFailed persists lastSeq when background run fails', async () => {
     assert.equal(run.last_seq, 1);
   });
 
-  const runJson = await readRunJson(cwd, spawned.run_id);
-  assert.equal(runJson.lastSeq, 1);
-  assert.match(runJson.error, /simulated failure/);
+  await waitFor(async () => {
+    const runJson = await readRunJson(cwd, spawned.run_id);
+    assert.equal(runJson.lastSeq, 1);
+    assert.match(runJson.error, /simulated failure/);
+  });
 });
 
 test('spawnRun does not persist orphaned queued runs when adapter spawn fails', async () => {
@@ -363,7 +365,8 @@ test('continueRun resumes a failed Codex session with a new run', async () => {
   });
 
   const resumed = await manager.continueRun({
-    run_id: first.run_id,
+    agent_name: 'worker1',
+    cwd,
     input_message: {
       role: 'user',
       parts: [{ type: 'text', text: 'Please continue from where you left off.' }],
@@ -385,6 +388,61 @@ test('continueRun resumes a failed Codex session with a new run', async () => {
   const completed = await manager.getRun({ run_id: resumed.run_id });
   assert.equal(completed.session_id, first.session_id);
 
+  await manager.shutdown(1000);
+});
+
+test('agent_name references prefer the current running run over queued resumes', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-reference-priority-'));
+  const adapter = new SessionQueueAdapter();
+  const manager = new RunManager([adapter]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker1',
+    prompt: 'first',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'running');
+  });
+
+  const second = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    prompt: 'second',
+    cwd,
+    session_mode: 'resume',
+    session_id: first.session_id,
+  });
+
+  const resolved = await manager.getRun({
+    agent_name: 'worker1',
+    cwd,
+  });
+  assert.equal(resolved.run_id, first.run_id);
+  assert.equal(resolved.status, 'running');
+
+  const queued = await manager.getRun({ run_id: second.run_id });
+  assert.equal(queued.status, 'queued');
+
+  adapter.handles[0].complete();
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: second.run_id });
+    assert.equal(run.status, 'running');
+  });
+
+  const resumed = await manager.getRun({
+    agent_name: 'worker1',
+    cwd,
+  });
+  assert.equal(resumed.run_id, second.run_id);
+  assert.equal(resumed.status, 'running');
+
+  adapter.handles[1].complete();
   await manager.shutdown(1000);
 });
 
@@ -627,8 +685,15 @@ test('RunManager can read historical runs and artifacts back from disk', async (
     assert.equal(historicalRun.cwd, cwd);
   });
 
+  const aliasedRun = await historicalManager.getRun({
+    agent_name: spawned.agent_name,
+    cwd,
+  });
+  assert.equal(aliasedRun.run_id, spawned.run_id);
+
   const polled = await historicalManager.pollEvents({
-    run_id: spawned.run_id,
+    agent_name: spawned.agent_name,
+    cwd,
     after_seq: 0,
     limit: 10,
     wait_ms: 0,
@@ -649,7 +714,8 @@ test('RunManager can read historical runs and artifacts back from disk', async (
   });
 
   const stdoutArtifact = await historicalManager.getEventArtifact({
-    run_id: spawned.run_id,
+    agent_name: spawned.agent_name,
+    cwd,
     seq: toolEvent.seq,
     field_path: '/stdout',
   });

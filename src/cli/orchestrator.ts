@@ -9,9 +9,14 @@ import type {
   AgentMessage,
   BackendKind,
   CancelRunResult,
+  CancelRunInput,
   ContinueRunResult,
+  ContinueRunInput,
   GetRunResult,
+  GetRunInput,
+  GetEventArtifactInput,
   NormalizedEvent,
+  PollEventsInput,
   RunResult,
   RunRole,
   RunStatus,
@@ -64,8 +69,8 @@ interface DetachedCliClient {
   daemonStatus(): Promise<DaemonStatus>;
   daemonStop(): Promise<DaemonStopResult>;
   spawnRun(input: SpawnRunInput): Promise<SpawnRunResult>;
-  continueRun(input: { run_id: string; input_message: AgentMessage }): Promise<ContinueRunResult>;
-  cancelRun(input: { run_id: string }): Promise<CancelRunResult>;
+  continueRun(input: ContinueRunInput): Promise<ContinueRunResult>;
+  cancelRun(input: CancelRunInput): Promise<CancelRunResult>;
 }
 
 const EXIT_SUCCESS = 0;
@@ -382,11 +387,11 @@ async function handleRunsCommand(
   }
 
   if (subcommand === 'show') {
-    const runId = requirePositional(parsed.positionals[2], 'Usage: orchestrator runs show <run-id> [--output text|json]');
+    const target = requirePositional(parsed.positionals[2], 'Usage: orchestrator runs show <run-id-or-agent-name> [--cwd CWD] [--output text|json]');
     const output = getOutputFormat(parsed, ['text', 'json']) as 'text' | 'json';
     const app = deps.createApp();
     try {
-      const run = await app.manager.getRun({ run_id: runId });
+      const run = await app.manager.getRun(buildRunReferenceInput(target, getOptionalCwd(parsed, io)));
       if (output === 'json') {
         io.stdout.write(`${JSON.stringify(run, null, 2)}\n`);
       } else {
@@ -399,9 +404,9 @@ async function handleRunsCommand(
   }
 
   if (subcommand === 'continue') {
-    const runId = requirePositional(
+    const target = requirePositional(
       parsed.positionals[2],
-      'Usage: orchestrator runs continue <run-id> <prompt> [--output text|json]',
+      'Usage: orchestrator runs continue <run-id-or-agent-name> <prompt> [--cwd CWD] [--output text|json]',
     );
     const output = getOutputFormat(parsed, ['text', 'json']) as 'text' | 'json';
     const prompt = getOptionalStringFlag(parsed, 'prompt') ?? joinPromptPositionals(parsed.positionals.slice(3));
@@ -409,7 +414,7 @@ async function handleRunsCommand(
     const inputMessage = buildInputMessage(prompt, stdinText);
     const client = deps.createDetachedClient();
     const result = await client.continueRun({
-      run_id: runId,
+      ...buildRunReferenceInput(target, getOptionalCwd(parsed, io)),
       input_message: inputMessage,
     });
     writeJsonOrText(io.stdout, output, result, formatContinueRunText(result));
@@ -417,10 +422,10 @@ async function handleRunsCommand(
   }
 
   if (subcommand === 'cancel') {
-    const runId = requirePositional(parsed.positionals[2], 'Usage: orchestrator runs cancel <run-id> [--output text|json]');
+    const target = requirePositional(parsed.positionals[2], 'Usage: orchestrator runs cancel <run-id-or-agent-name> [--cwd CWD] [--output text|json]');
     const output = getOutputFormat(parsed, ['text', 'json']) as 'text' | 'json';
     const client = deps.createDetachedClient();
-    const result = await client.cancelRun({ run_id: runId });
+    const result = await client.cancelRun(buildRunReferenceInput(target, getOptionalCwd(parsed, io)));
     writeJsonOrText(io.stdout, output, result, formatCancelRunText(result));
     return EXIT_SUCCESS;
   }
@@ -465,12 +470,12 @@ async function handleEventsCommand(
 ): Promise<number> {
   const subcommand = parsed.positionals[1];
   if (subcommand !== 'tail') {
-    throw new CliUsageError('Usage: orchestrator events tail <run-id> [--after SEQ] [--limit N] [--output text|json|jsonl]');
+    throw new CliUsageError('Usage: orchestrator events tail <run-id-or-agent-name> [--cwd CWD] [--after SEQ] [--limit N] [--output text|json|jsonl]');
   }
 
-  const runId = requirePositional(
+  const target = requirePositional(
     parsed.positionals[2],
-    'Usage: orchestrator events tail <run-id> [--after SEQ] [--limit N] [--output text|json|jsonl]',
+    'Usage: orchestrator events tail <run-id-or-agent-name> [--cwd CWD] [--after SEQ] [--limit N] [--output text|json|jsonl]',
   );
   const output = getOutputFormat(parsed, ['text', 'json', 'jsonl']);
   const afterStart = getOptionalNumberFlag(parsed, 'after') ?? 0;
@@ -480,6 +485,9 @@ async function handleEventsCommand(
   const app = deps.createApp();
 
   try {
+    const runReference = buildRunReferenceInput(target, getOptionalCwd(parsed, io));
+    const resolvedRun = await app.manager.getRun(runReference);
+    const runId = resolvedRun.run_id;
     let afterSeq = afterStart;
     let idleStartedAt = Date.now();
     const allEvents: NormalizedEvent[] = [];
@@ -555,28 +563,29 @@ async function handleArtifactsCommand(
   const subcommand = parsed.positionals[1];
   if (subcommand !== 'get') {
     throw new CliUsageError(
-      'Usage: orchestrator artifacts get <run-id> <seq> <field-path> [--offset N] [--limit N] [--output text|json]',
+      'Usage: orchestrator artifacts get <run-id-or-agent-name> <seq> <field-path> [--cwd CWD] [--offset N] [--limit N] [--output text|json]',
     );
   }
 
-  const runId = requirePositional(parsed.positionals[2], 'Usage: orchestrator artifacts get <run-id> <seq> <field-path>');
-  const seq = getRequiredNumber(parsed.positionals[3], 'Usage: orchestrator artifacts get <run-id> <seq> <field-path>');
+  const target = requirePositional(parsed.positionals[2], 'Usage: orchestrator artifacts get <run-id-or-agent-name> <seq> <field-path>');
+  const seq = getRequiredNumber(parsed.positionals[3], 'Usage: orchestrator artifacts get <run-id-or-agent-name> <seq> <field-path>');
   const fieldPath = requirePositional(
     parsed.positionals[4],
-    'Usage: orchestrator artifacts get <run-id> <seq> <field-path>',
+    'Usage: orchestrator artifacts get <run-id-or-agent-name> <seq> <field-path>',
   );
   const output = getOutputFormat(parsed, ['text', 'json']);
   const outputFile = getOptionalStringFlag(parsed, 'output-file');
   const app = deps.createApp();
 
   try {
-    const artifact = await app.manager.getEventArtifact({
-      run_id: runId,
+    const artifactInput: GetEventArtifactInput = {
+      ...buildRunReferenceInput(target, getOptionalCwd(parsed, io)),
       seq,
       field_path: fieldPath,
       offset: getOptionalNumberFlag(parsed, 'offset'),
       limit: getOptionalNumberFlag(parsed, 'limit'),
-    });
+    };
+    const artifact = await app.manager.getEventArtifact(artifactInput);
     if (outputFile) {
       const target = path.isAbsolute(outputFile) ? outputFile : path.resolve(io.cwd, outputFile);
       await writeFile(target, artifact.content, 'utf8');
@@ -732,6 +741,17 @@ function getOptionalCwd(parsed: ParsedArgs, io: OrchestratorCliIo): string | und
 function getCommandCwd(parsed: ParsedArgs, io: OrchestratorCliIo): string {
   const cwd = getOptionalCwd(parsed, io) ?? io.cwd;
   return path.isAbsolute(cwd) ? cwd : path.resolve(io.cwd, cwd);
+}
+
+function buildRunReferenceInput(target: string, cwd: string | undefined): GetRunInput {
+  if (isRunIdLike(target)) {
+    return { run_id: target };
+  }
+  return cwd ? { agent_name: target, cwd } : { agent_name: target };
+}
+
+function isRunIdLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function joinPromptPositionals(positionals: string[]): string | undefined {
@@ -1038,11 +1058,11 @@ function printUsage(stderr: Pick<NodeJS.WriteStream, 'write'>): void {
   orchestrator run <prompt> [--backend BACKEND] [--cwd CWD] [--name AGENT_NAME] [--resume SESSION_ID] [--profile PATH] [--schema PATH] [--detach] [--output text|json|jsonl]
   orchestrator review <prompt> [--backend BACKEND] [--cwd CWD] [--name AGENT_NAME] [--resume SESSION_ID] [--profile PATH] [--schema PATH] [--detach] [--output text|json|jsonl]
   orchestrator runs list [--cwd CWD] [--backend BACKEND] [--status STATUS] [--output text|json]
-  orchestrator runs show <run-id> [--output text|json]
-  orchestrator runs continue <run-id> <prompt> [--output text|json]
-  orchestrator runs cancel <run-id> [--output text|json]
-  orchestrator events tail <run-id> [--after SEQ] [--limit N] [--timeout MS] [--output text|json|jsonl]
-  orchestrator artifacts get <run-id> <seq> <field-path> [--offset N] [--limit N] [--output-file PATH] [--output text|json]
+  orchestrator runs show <run-id-or-agent-name> [--cwd CWD] [--output text|json]
+  orchestrator runs continue <run-id-or-agent-name> <prompt> [--cwd CWD] [--output text|json]
+  orchestrator runs cancel <run-id-or-agent-name> [--cwd CWD] [--output text|json]
+  orchestrator events tail <run-id-or-agent-name> [--cwd CWD] [--after SEQ] [--limit N] [--timeout MS] [--output text|json|jsonl]
+  orchestrator artifacts get <run-id-or-agent-name> <seq> <field-path> [--cwd CWD] [--offset N] [--limit N] [--output-file PATH] [--output text|json]
   orchestrator daemon <start|status|stop> [--output text|json]
 `);
 }
