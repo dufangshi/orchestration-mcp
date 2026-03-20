@@ -5,6 +5,9 @@ import { buildClaudeOptions, ClaudeCodeAdapter } from '../dist/adapters/claude.j
 
 const originalAuthToken = process.env.ANTHROPIC_AUTH_TOKEN;
 const originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
+const originalClaudePermissionMode = process.env.ORCHESTRATOR_CLAUDE_PERMISSION_MODE;
+const originalClaudeDangerousSkip = process.env.ORCHESTRATOR_CLAUDE_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS;
+const originalEnvFile = process.env.ORCHESTRATOR_ENV_FILE;
 
 function restoreClaudeEnv() {
   if (originalAuthToken === undefined) {
@@ -17,6 +20,24 @@ function restoreClaudeEnv() {
     delete process.env.ANTHROPIC_BASE_URL;
   } else {
     process.env.ANTHROPIC_BASE_URL = originalBaseUrl;
+  }
+
+  if (originalClaudePermissionMode === undefined) {
+    delete process.env.ORCHESTRATOR_CLAUDE_PERMISSION_MODE;
+  } else {
+    process.env.ORCHESTRATOR_CLAUDE_PERMISSION_MODE = originalClaudePermissionMode;
+  }
+
+  if (originalClaudeDangerousSkip === undefined) {
+    delete process.env.ORCHESTRATOR_CLAUDE_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS;
+  } else {
+    process.env.ORCHESTRATOR_CLAUDE_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS = originalClaudeDangerousSkip;
+  }
+
+  if (originalEnvFile === undefined) {
+    delete process.env.ORCHESTRATOR_ENV_FILE;
+  } else {
+    process.env.ORCHESTRATOR_ENV_FILE = originalEnvFile;
   }
 }
 
@@ -93,6 +114,8 @@ test('buildClaudeOptions enables forced fast mode only for direct auth envs', ()
   assert.equal(oauthOptions.sessionId, undefined);
   assert.equal(oauthOptions.resume, 'backend-session-9');
   assert.equal(oauthOptions.model, undefined);
+  assert.equal(oauthOptions.permissionMode, 'bypassPermissions');
+  assert.equal(oauthOptions.allowDangerouslySkipPermissions, true);
   assert.equal(oauthOptions.settings, undefined);
 });
 

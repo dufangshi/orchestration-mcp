@@ -2,6 +2,7 @@ import { Codex, type Thread, type ThreadEvent, type ThreadItem } from '@openai/c
 
 import { AsyncEventQueue } from './async-event-queue.js';
 import { BaseRunAdapter } from './base.js';
+import { getCodexRuntimeOptions } from '../core/agent-runtime-config.js';
 import { buildPeerEnvironment } from '../core/peer-env.js';
 import { injectSystemPromptIntoPrompt } from '../core/profile.js';
 import type {
@@ -310,13 +311,7 @@ export class CodexAdapter extends BaseRunAdapter {
     const codex = new Codex({
       env: buildPeerEnvironment(params),
     });
-    const threadOptions = {
-      workingDirectory: params.cwd,
-      skipGitRepoCheck: true,
-      sandboxMode: 'workspace-write' as const,
-      approvalPolicy: 'never' as const,
-      networkAccessEnabled: true,
-    };
+    const threadOptions = buildCodexThreadOptions(params);
 
     const thread =
       params.sessionMode === 'resume' && params.session.backendSessionId
@@ -331,6 +326,17 @@ export class CodexAdapter extends BaseRunAdapter {
       handle.abort();
     }
   }
+}
+
+export function buildCodexThreadOptions(params: AdapterSpawnParams) {
+  const runtimeOptions = getCodexRuntimeOptions();
+  return {
+    workingDirectory: params.cwd,
+    skipGitRepoCheck: true,
+    sandboxMode: runtimeOptions.sandboxMode,
+    approvalPolicy: runtimeOptions.approvalPolicy,
+    networkAccessEnabled: runtimeOptions.networkAccessEnabled,
+  };
 }
 
 function buildCodexInput(params: AdapterSpawnParams): string {

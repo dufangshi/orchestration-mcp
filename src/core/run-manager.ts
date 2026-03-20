@@ -210,8 +210,8 @@ export class RunManager {
     const managed = target.managed;
     const storedRecord = target.record;
 
-    if (storedRecord.status === 'failed') {
-      return this.resumeFailedRun(storedRecord, input.input_message);
+    if (storedRecord.status === 'failed' || storedRecord.status === 'completed') {
+      return this.resumeTerminalRun(storedRecord, input.input_message, 'continue_run_after_terminal');
     }
 
     if (!managed) {
@@ -890,7 +890,11 @@ export class RunManager {
     await this.persistEvent(managed, event);
   }
 
-  private async resumeFailedRun(record: RunRecord, inputMessage: AgentMessage): Promise<ContinueRunResult> {
+  private async resumeTerminalRun(
+    record: RunRecord,
+    inputMessage: AgentMessage,
+    resumeReason: string,
+  ): Promise<ContinueRunResult> {
     const session = await this.sessions.getExisting(record.cwd, record.sessionId);
     if (!session) {
       throw new Error(`Unknown session_id: ${record.sessionId}`);
@@ -914,7 +918,7 @@ export class RunManager {
       profile: record.profile,
       metadata: {
         resumed_from_run_id: record.runId,
-        resume_reason: 'continue_run_after_failed',
+        resume_reason: resumeReason,
       },
       backend_config: this.buildResumeBackendConfig(record, session),
     });

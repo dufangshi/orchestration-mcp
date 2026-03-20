@@ -391,6 +391,64 @@ test('continueRun resumes a failed Codex session with a new run', async () => {
   await manager.shutdown(1000);
 });
 
+test('continueRun resumes a completed Codex session with a new run', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-continue-completed-'));
+  const adapter = new SessionQueueAdapter();
+  const manager = new RunManager([adapter]);
+
+  const first = await manager.spawnRun({
+    backend: 'codex',
+    role: 'worker',
+    nickname: 'worker1',
+    prompt: 'first pass',
+    cwd,
+    session_mode: 'new',
+  });
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'running');
+  });
+
+  adapter.handles[0].complete();
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: first.run_id });
+    assert.equal(run.status, 'completed');
+  });
+
+  const resumed = await manager.continueRun({
+    agent_name: 'worker1',
+    cwd,
+    input_message: {
+      role: 'user',
+      parts: [{ type: 'text', text: 'Please continue with the remaining work.' }],
+    },
+  });
+
+  assert.equal(resumed.mode, 'resume');
+  assert.equal(resumed.resumed_from_run_id, first.run_id);
+  assert.equal(resumed.session_id, first.session_id);
+  assert.equal(resumed.agent_name, 'worker1');
+  assert.notEqual(resumed.run_id, first.run_id);
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: resumed.run_id });
+    assert.equal(run.status, 'running');
+    assert.equal(run.agent_name, 'worker1');
+  });
+
+  adapter.handles[1].complete();
+
+  await waitFor(async () => {
+    const run = await manager.getRun({ run_id: resumed.run_id });
+    assert.equal(run.status, 'completed');
+    assert.equal(run.session_id, first.session_id);
+  });
+
+  await manager.shutdown(1000);
+});
+
 test('agent_name references prefer the current running run over queued resumes', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'orchestrator-agent-reference-priority-'));
   const adapter = new SessionQueueAdapter();

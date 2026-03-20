@@ -13,7 +13,7 @@ export function registerContinueRunTool(server: McpServer, manager: RunManager):
     'continue_run',
     {
       description:
-        'Send an additional input message to a waiting run by run_id or agent_name, or resume a recoverable failed session with a new run.',
+        'Send an additional input message to a waiting run by run_id or agent_name, or resume a recoverable terminal session with a new run on the same backend conversation.',
       inputSchema: continueRunSchema,
       outputSchema: continueRunResultSchema,
     },
