@@ -51,8 +51,16 @@ function shouldForceClaudeFastMode(): boolean {
 
 export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
   const shouldForceFastMode = shouldForceClaudeFastMode();
+  const pathToClaudeCodeExecutable = process.env.CLAUDE_CODE_EXECUTABLE || '/root/.local/bin/claude';
+  const useDangerousPermissionBypass =
+    process.env.CLAUDE_CODE_BUBBLEWRAP === '1' ||
+    process.env.IS_SANDBOX === '1' ||
+    process.getuid?.() !== 0;
+  const allowDangerouslySkipPermissions = useDangerousPermissionBypass ? true : undefined;
+  const permissionMode = useDangerousPermissionBypass ? 'bypassPermissions' : 'default';
 
   return {
+    pathToClaudeCodeExecutable,
     cwd: params.cwd,
     tools: {
       type: 'preset',
@@ -66,8 +74,8 @@ export function buildClaudeOptions(params: AdapterSpawnParams): ClaudeOptions {
           append: params.systemPrompt,
         }
       : undefined,
-    permissionMode: 'bypassPermissions',
-    allowDangerouslySkipPermissions: true,
+    permissionMode,
+    allowDangerouslySkipPermissions,
     settingSources: ['user', 'project', 'local'],
     settings: shouldForceFastMode
       ? {
